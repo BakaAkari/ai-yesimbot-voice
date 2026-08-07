@@ -32,6 +32,10 @@ interface Config {
     onMentionOnly: boolean;
     /** 发送失败时是否告警日志（不打扰用户） */
     logFailures: boolean;
+    /** NapCat HTTP API 地址（QQ 语音直发；空 = 回退 Koishi 元素发送） */
+    napcatHttpUrl: string;
+    /** 发语音时吞掉 yesimbot 文本（只发语音，不发文本） */
+    replaceText: boolean;
 }
 declare const Config: Schema<Config>;
 declare function apply(ctx: Context, config: Config): void;

@@ -1,5 +1,5 @@
-import { Context, Schema, Logger } from 'koishi'
-import type { AgentPlugin, TurnResult } from '@yesimbot/agent-runtime'
+import { Context, Schema, Logger, h, type Bot } from 'koishi'
+import type { AgentPlugin, TurnResult, AgentEntry } from '@yesimbot/agent-runtime'
 import { TtsClient, type TtsClientConfig } from './tts-client.js'
 import { extractReplyText } from './text-extract.js'
 import { decide, type TtsPolicyConfig } from './policy.js'
@@ -39,6 +39,10 @@ export interface Config {
   onMentionOnly: boolean
   /** 发送失败时是否告警日志（不打扰用户） */
   logFailures: boolean
+  /** NapCat HTTP API 地址（QQ 语音直发；空 = 回退 Koishi 元素发送） */
+  napcatHttpUrl: string
+  /** 发语音时吞掉 yesimbot 文本（只发语音，不发文本） */
+  replaceText: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -56,6 +60,8 @@ export const Config: Schema<Config> = Schema.object({
   groupOnly: Schema.boolean().default(true).description('仅群聊配语音'),
   onMentionOnly: Schema.boolean().default(false).description('仅被 @ 时配语音'),
   logFailures: Schema.boolean().default(true).description('合成/发送失败写告警日志（不影响文本回复）'),
+  napcatHttpUrl: Schema.string().default('').description('NapCat HTTP API 地址，如 http://mita_napcat:6199；QQ 语音直发走此通道，留空回退 Koishi 元素发送（本地开发）'),
+  replaceText: Schema.boolean().default(false).description('命中语音时吞掉 yesimbot 文本回复，只发语音（TTS 失败自动补发文本）'),
 })
 
 export function apply(ctx: Context, config: Config) {
@@ -80,27 +86,101 @@ export function apply(ctx: Context, config: Config) {
   // 每个 channel 独立冷却
   const lastSpeakAt = new Map<string, number>()
 
+  // —— replaceText 模式：吞掉的待发语音（channelId -> 合并后的文本）——
+  // 消费用防抖，避免 turn 内多段 <message> 各自触发
+  const pendingVoice = new Map<string, { text: string; timer: ReturnType<typeof setTimeout>; consumed: boolean }>()
+
+  function consumePending(channelId: string, bot: Bot, platform: string): void {
+    const item = pendingVoice.get(channelId)
+    if (!item || item.consumed) return
+    item.consumed = true
+    if (item.timer) clearTimeout(item.timer)
+    pendingVoice.delete(channelId)
+    const text = item.text
+    void (async () => {
+      try {
+        const out = await tts.synthesize(text, config.outputDir, `voice-${Date.now()}.wav`)
+        await sendVoice(bot, channelId, out.wavPath, platform, config.napcatHttpUrl)
+        lastSpeakAt.set(channelId, Date.now())
+        logger.info('voice sent (text replaced) channel=%s len=%d dur=%dms text=%s', channelId, out.pcmBytes, out.durationMs, text.slice(0, 30))
+      } catch (err) {
+        // TTS/发送失败：补发文本，保证回复不丢
+        logger.warn('voice failed, fallback text channel=%s: %s', channelId, err instanceof Error ? err.message : String(err))
+        try {
+          await bot.sendMessage(channelId, text)
+          logger.info('fallback text sent channel=%s', channelId)
+        } catch (fallbackErr) {
+          if (config.logFailures) {
+            logger.warn('fallback text also failed channel=%s: %s', channelId, fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr))
+          }
+        }
+      }
+    })()
+  }
+
+  function queuePending(bot: Bot, channelId: string, platform: string, text: string): void {
+    const existing = pendingVoice.get(channelId)
+    if (existing && !existing.consumed) {
+      // 同 turn 多段：合并文本，重置防抖
+      existing.text = existing.text.length > text.length ? existing.text : text
+      if (existing.timer) clearTimeout(existing.timer)
+      existing.timer = setTimeout(() => consumePending(channelId, bot, platform), 600)
+      return
+    }
+    const timer = setTimeout(() => consumePending(channelId, bot, platform), 600)
+    pendingVoice.set(channelId, { text, timer, consumed: false })
+  }
+
+  // 从 sendMessage 的 content 里提取纯文本（h 元素数组 / 字符串）
+  function extractSendText(content: unknown): string {
+    if (typeof content === 'string') return content.trim()
+    if (Array.isArray(content)) {
+      return content
+        .map((seg) => {
+          if (typeof seg === 'string') return seg
+          if (seg && typeof seg === 'object') {
+            const s = seg as { type?: string; attrs?: { content?: string; text?: string }; children?: unknown[] }
+            if (s.attrs?.content) return s.attrs.content
+            if (s.attrs?.text) return s.attrs.text
+            if (Array.isArray(s.children)) return s.children.map((c) => (typeof c === 'string' ? c : '')).join('')
+          }
+          return ''
+        })
+        .join('')
+        .trim()
+    }
+    return ''
+  }
+
   type ChannelRef = { bot: Parameters<typeof sendVoice>[0]; channelId: string; platform: string; isShared: boolean }
   let currentChannelCtx: ChannelRef | null = null
 
   const voicePlugin: AgentPlugin = {
     name: 'aka-yesimbot-voice',
+    // replaceText 模式下：turn 结束时立即消费（不等防抖）
     async onTurnFinish(result) {
       const ctxRef = currentChannelCtx
       if (!ctxRef) return
-      const { bot, channelId, platform, isShared } = ctxRef
+      const { bot, channelId, platform } = ctxRef
+      if (config.replaceText) {
+        const item = pendingVoice.get(channelId)
+        if (item && !item.consumed) {
+          consumePending(channelId, bot, platform)
+        }
+        return
+      }
+      // —— 旧模式：文本照发，语音附带 ——
       if (!config.platforms.includes(platform)) return
-
       const text = extractReplyText(result.messages)
       if (!text) return
-      logger.info('voice candidate channel=%s shared=%s text=%s', channelId, isShared, text.slice(0, 40))
+      logger.info('voice candidate channel=%s shared=%s text=%s', channelId, ctxRef.isShared, text.slice(0, 40))
 
       const now = Date.now()
       const decision = decide(policyCfg, {
         text,
         channelId,
-        isShared,
-        mentioned: false, // onTurnFinish 无 mention 信息；如需 @ 判定改由输入事件侧记录
+        isShared: ctxRef.isShared,
+        mentioned: false,
         now,
         lastSpeakAt: lastSpeakAt.get(channelId) ?? 0,
       })
@@ -109,11 +189,10 @@ export function apply(ctx: Context, config: Config) {
         return
       }
 
-      // 异步合成 + 发送，失败静默（不阻塞 turn 完成、不影响文本回复）
       void (async () => {
         try {
           const out = await tts.synthesize(text, config.outputDir, `voice-${Date.now()}.wav`)
-          await sendVoice(bot, channelId, out.wavPath, platform)
+          await sendVoice(bot, channelId, out.wavPath, platform, config.napcatHttpUrl)
           lastSpeakAt.set(channelId, Date.now())
           logger.info('voice sent channel=%s len=%d dur=%dms wav=%s', channelId, out.pcmBytes, out.durationMs, out.wavPath)
         } catch (err) {
@@ -138,7 +217,43 @@ export function apply(ctx: Context, config: Config) {
       platform: scope.platform,
       isShared: scope.type === 'shared',
     }
+
+    // replaceText 模式：patch 发送出口，命中语音策略时吞掉文本
+    if (config.replaceText && config.platforms.includes(scope.platform)) {
+      const origSend = bot.sendMessage.bind(bot)
+      bot.sendMessage = (async (channelId: string, content: unknown, ...rest: unknown[]) => {
+        const text = extractSendText(content)
+        const channelIdStr = String(channelId)
+        const now = Date.now()
+        const isShared = scope.type === 'shared'
+        // 仅群聊 + 策略命中 → 吞文本排队语音；否则原样发送
+        // 注意：冷却判定交给 decide()（now - lastSpeakAt < cooldownSeconds），
+        // 不能用 lastSpeakAt.has() 存在性判断（历史语音记录会永久跳过判定）
+        if (text && isShared && !pendingVoice.has(channelIdStr)) {
+          const decision = decide(policyCfg, {
+            text,
+            channelId: channelIdStr,
+            isShared,
+            mentioned: false,
+            now,
+            lastSpeakAt: lastSpeakAt.get(channelIdStr) ?? 0,
+          })
+          if (decision.speak) {
+            logger.info('text replaced by voice channel=%s reason=%s text=%s', channelIdStr, decision.reason, text.slice(0, 30))
+            queuePending(bot, channelIdStr, scope.platform, text)
+            return []
+          }
+          logger.info('text kept (voice skip) channel=%s reason=%s text=%s', channelIdStr, decision.reason, text.slice(0, 30))
+        } else if (text && pendingVoice.has(channelIdStr)) {
+          // 同 turn 后续段落：并入语音文本，继续吞
+          queuePending(bot, channelIdStr, scope.platform, text)
+          return []
+        }
+        return origSend(channelId, content, ...rest)
+      }) as typeof bot.sendMessage
+      logger.info('aka-yesimbot-voice: sendMessage patched for channel %s (replaceText)', scope.channelId)
+    }
     return voicePlugin
   })
-  logger.info('aka-yesimbot-voice registered (platforms=%s)', config.platforms.join(','))
+  logger.info('aka-yesimbot-voice registered (platforms=%s, replaceText=%s)', config.platforms.join(','), config.replaceText)
 }
