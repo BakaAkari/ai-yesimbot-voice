@@ -1,5 +1,41 @@
+"use strict";
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __export = (target, all) => {
+  for (var name2 in all)
+    __defProp(target, name2, { get: all[name2], enumerable: true });
+};
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+
 // src/index.ts
-import { Schema } from "koishi";
+var index_exports = {};
+__export(index_exports, {
+  Config: () => Config,
+  apply: () => apply,
+  name: () => name
+});
+module.exports = __toCommonJS(index_exports);
+var import_koishi2 = require("koishi");
 
 // src/tts-client.ts
 var WAV_HEADER_SIZE = 44;
@@ -130,29 +166,29 @@ function decide(cfg, opts) {
 }
 
 // src/sender.ts
-import { h } from "koishi";
+var import_koishi = require("koishi");
 async function sendVoice(bot, channelId, wavPath, platform) {
-  const element = platform === "lark" ? h("audio", { src: wavPath }) : h("record", { src: wavPath });
+  const element = platform === "lark" ? (0, import_koishi.h)("audio", { src: wavPath }) : (0, import_koishi.h)("record", { src: wavPath });
   await bot.sendMessage(channelId, [element]);
 }
 
 // src/index.ts
 var name = "aka-yesimbot-voice";
-var Config = Schema.object({
-  ttsEnabled: Schema.boolean().default(true).description("\u603B\u5F00\u5173\uFF1A\u5F00\u542F\u540E bot \u56DE\u590D\u6309\u7B56\u7565\u9644\u5E26\u8BED\u97F3"),
-  platforms: Schema.array(String).default(["onebot"]).description("\u751F\u6548\u5E73\u53F0\uFF1Aonebot\uFF08QQ\uFF09/ lark\uFF08\u98DE\u4E66\uFF09"),
-  ttsApiBase: Schema.string().default("http://127.0.0.1:50000").description("CosyVoice3 \u670D\u52A1\u5730\u5740"),
-  voicePromptPath: Schema.string().default("").description("\u97F3\u8272 prompt_wav \u672C\u5730\u8DEF\u5F84\uFF1B\u7559\u7A7A\u4F7F\u7528\u670D\u52A1\u7AEF\u9ED8\u8BA4\u97F3\u8272"),
-  instructText: Schema.string().default("\u8BF7\u7528\u81EA\u7136\u6D41\u7545\u7684\u4E2D\u82F1\u53CC\u8BED\u6717\u8BFB\uFF0C\u82F1\u6587\u5355\u8BCD\u4F7F\u7528\u6807\u51C6\u82F1\u8BED\u53D1\u97F3\uFF0C\u6CE8\u610F\u65AD\u53E5\u548C\u505C\u987F\uFF0C\u8BED\u901F\u9002\u4E2D\u3002<|endofprompt|>").description("\u6717\u8BFB\u6307\u4EE4"),
-  ttsTimeoutMs: Schema.number().min(1e3).max(12e4).default(3e4).description("\u5408\u6210\u8D85\u65F6 ms"),
-  outputDir: Schema.string().default("data/aka-yesimbot-voice").description("\u5408\u6210\u97F3\u9891\u8F93\u51FA\u76EE\u5F55"),
-  probability: Schema.number().min(0).max(1).default(0.2).description("\u6BCF\u6761\u56DE\u590D\u914D\u8BED\u97F3\u6982\u7387"),
-  minLength: Schema.number().min(0).default(8).description("\u6700\u77ED\u6587\u672C\u957F\u5EA6\uFF08\u5B57\u7B26\uFF09\u624D\u914D\u8BED\u97F3"),
-  maxLength: Schema.number().min(0).default(120).description("\u8D85\u8FC7\u6B64\u957F\u5EA6\u4E0D\u914D\u8BED\u97F3"),
-  cooldownSeconds: Schema.number().min(0).default(120).description("\u540C\u6E20\u9053\u51B7\u5374\u79D2\u6570"),
-  groupOnly: Schema.boolean().default(true).description("\u4EC5\u7FA4\u804A\u914D\u8BED\u97F3"),
-  onMentionOnly: Schema.boolean().default(false).description("\u4EC5\u88AB @ \u65F6\u914D\u8BED\u97F3"),
-  logFailures: Schema.boolean().default(true).description("\u5408\u6210/\u53D1\u9001\u5931\u8D25\u5199\u544A\u8B66\u65E5\u5FD7\uFF08\u4E0D\u5F71\u54CD\u6587\u672C\u56DE\u590D\uFF09")
+var Config = import_koishi2.Schema.object({
+  ttsEnabled: import_koishi2.Schema.boolean().default(true).description("\u603B\u5F00\u5173\uFF1A\u5F00\u542F\u540E bot \u56DE\u590D\u6309\u7B56\u7565\u9644\u5E26\u8BED\u97F3"),
+  platforms: import_koishi2.Schema.array(String).default(["onebot"]).description("\u751F\u6548\u5E73\u53F0\uFF1Aonebot\uFF08QQ\uFF09/ lark\uFF08\u98DE\u4E66\uFF09"),
+  ttsApiBase: import_koishi2.Schema.string().default("http://127.0.0.1:50000").description("CosyVoice3 \u670D\u52A1\u5730\u5740"),
+  voicePromptPath: import_koishi2.Schema.string().default("").description("\u97F3\u8272 prompt_wav \u672C\u5730\u8DEF\u5F84\uFF1B\u7559\u7A7A\u4F7F\u7528\u670D\u52A1\u7AEF\u9ED8\u8BA4\u97F3\u8272"),
+  instructText: import_koishi2.Schema.string().default("\u8BF7\u7528\u81EA\u7136\u6D41\u7545\u7684\u4E2D\u82F1\u53CC\u8BED\u6717\u8BFB\uFF0C\u82F1\u6587\u5355\u8BCD\u4F7F\u7528\u6807\u51C6\u82F1\u8BED\u53D1\u97F3\uFF0C\u6CE8\u610F\u65AD\u53E5\u548C\u505C\u987F\uFF0C\u8BED\u901F\u9002\u4E2D\u3002<|endofprompt|>").description("\u6717\u8BFB\u6307\u4EE4"),
+  ttsTimeoutMs: import_koishi2.Schema.number().min(1e3).max(12e4).default(3e4).description("\u5408\u6210\u8D85\u65F6 ms"),
+  outputDir: import_koishi2.Schema.string().default("data/aka-yesimbot-voice").description("\u5408\u6210\u97F3\u9891\u8F93\u51FA\u76EE\u5F55"),
+  probability: import_koishi2.Schema.number().min(0).max(1).default(0.2).description("\u6BCF\u6761\u56DE\u590D\u914D\u8BED\u97F3\u6982\u7387"),
+  minLength: import_koishi2.Schema.number().min(0).default(8).description("\u6700\u77ED\u6587\u672C\u957F\u5EA6\uFF08\u5B57\u7B26\uFF09\u624D\u914D\u8BED\u97F3"),
+  maxLength: import_koishi2.Schema.number().min(0).default(120).description("\u8D85\u8FC7\u6B64\u957F\u5EA6\u4E0D\u914D\u8BED\u97F3"),
+  cooldownSeconds: import_koishi2.Schema.number().min(0).default(120).description("\u540C\u6E20\u9053\u51B7\u5374\u79D2\u6570"),
+  groupOnly: import_koishi2.Schema.boolean().default(true).description("\u4EC5\u7FA4\u804A\u914D\u8BED\u97F3"),
+  onMentionOnly: import_koishi2.Schema.boolean().default(false).description("\u4EC5\u88AB @ \u65F6\u914D\u8BED\u97F3"),
+  logFailures: import_koishi2.Schema.boolean().default(true).description("\u5408\u6210/\u53D1\u9001\u5931\u8D25\u5199\u544A\u8B66\u65E5\u5FD7\uFF08\u4E0D\u5F71\u54CD\u6587\u672C\u56DE\u590D\uFF09")
 });
 function apply(ctx, config) {
   const logger = ctx.logger("aka-yesimbot-voice");
@@ -222,9 +258,10 @@ function apply(ctx, config) {
     logger.info("aka-yesimbot-voice registered (platforms=%s)", config.platforms.join(","));
   });
 }
-export {
+// Annotate the CommonJS export names for ESM import in node:
+0 && (module.exports = {
   Config,
   apply,
   name
-};
+});
 //# sourceMappingURL=index.js.map
