@@ -37,6 +37,13 @@ describe('extractReplyText', () => {
     expect(extractReplyText([])).toBe('')
   })
 
+  test('strips <message> wrapper tags', () => {
+    const messages = [
+      { ...base, role: 'assistant', content: '<message>没有这功能，别惦记了</message>' },
+    ]
+    expect(extractReplyText(messages)).toBe('没有这功能，别惦记了')
+  })
+
   test('takes first non-empty assistant message', () => {
     const messages = [
       { ...base, role: 'assistant', content: '' },

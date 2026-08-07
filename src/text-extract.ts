@@ -19,14 +19,25 @@ export function extractReplyText(messages: readonly AgentMessage[] | undefined |
 }
 
 function contentToText(content: unknown): string {
-  if (typeof content === 'string') return content.trim()
+  if (typeof content === 'string') return stripMessageTags(content.trim())
   if (!Array.isArray(content)) return ''
   const parts: string[] = []
   for (const part of content) {
     if (part && typeof part === 'object' && (part as { type?: string }).type === 'text') {
       const text = (part as { text?: unknown }).text
-      if (typeof text === 'string' && text.trim()) parts.push(text.trim())
+      if (typeof text === 'string' && text.trim()) parts.push(stripMessageTags(text.trim()))
     }
   }
   return parts.join('\n').trim()
+}
+
+/**
+ * 剥离 yesimbot/AI 回复中的 XML 包裹标签（<message>...</message> 等），
+ * 避免 TTS 把标签当正文念出来。
+ */
+function stripMessageTags(text: string): string {
+  return text
+    .replace(/<\/?message>/g, '')
+    .replace(/<[^>]+>/g, (tag) => (tag.startsWith('</') || tag.startsWith('<message') ? '' : tag))
+    .trim()
 }

@@ -23,8 +23,9 @@ export interface TtsDecision {
   reason: string
 }
 
-/** 群聊判定（Koishi channelId 通常以 group: 开头） */
-export function isGroupChannel(channelId: string): boolean {
+/** 群聊判定：优先用 scope.type（shared/direct），channelId 前缀兜底 */
+export function isGroupChannel(channelId: string, isShared?: boolean): boolean {
+  if (isShared !== undefined) return isShared
   return channelId.startsWith('group:')
 }
 
@@ -43,6 +44,7 @@ export function decide(
   opts: {
     text: string
     channelId: string
+    isShared?: boolean
     mentioned: boolean
     now: number
     lastSpeakAt: number
@@ -50,7 +52,7 @@ export function decide(
 ): TtsDecision {
   if (!cfg.ttsEnabled) return { speak: false, reason: 'tts-disabled' }
   const textLen = Array.from(opts.text).length
-  if (cfg.groupOnly && !isGroupChannel(opts.channelId)) return { speak: false, reason: 'not-group' }
+  if (cfg.groupOnly && !isGroupChannel(opts.channelId, opts.isShared)) return { speak: false, reason: 'not-group' }
   if (cfg.onMentionOnly && !opts.mentioned) return { speak: false, reason: 'not-mentioned' }
   if (textLen < cfg.minLength) return { speak: false, reason: 'too-short' }
   if (textLen > cfg.maxLength) return { speak: false, reason: 'too-long' }

@@ -137,26 +137,30 @@ function extractReplyText(messages) {
   return "";
 }
 function contentToText(content) {
-  if (typeof content === "string") return content.trim();
+  if (typeof content === "string") return stripMessageTags(content.trim());
   if (!Array.isArray(content)) return "";
   const parts = [];
   for (const part of content) {
     if (part && typeof part === "object" && part.type === "text") {
       const text = part.text;
-      if (typeof text === "string" && text.trim()) parts.push(text.trim());
+      if (typeof text === "string" && text.trim()) parts.push(stripMessageTags(text.trim()));
     }
   }
   return parts.join("\n").trim();
 }
+function stripMessageTags(text) {
+  return text.replace(/<\/?message>/g, "").replace(/<[^>]+>/g, (tag) => tag.startsWith("</") || tag.startsWith("<message") ? "" : tag).trim();
+}
 
 // src/policy.ts
-function isGroupChannel(channelId) {
+function isGroupChannel(channelId, isShared) {
+  if (isShared !== void 0) return isShared;
   return channelId.startsWith("group:");
 }
 function decide(cfg, opts) {
   if (!cfg.ttsEnabled) return { speak: false, reason: "tts-disabled" };
   const textLen = Array.from(opts.text).length;
-  if (cfg.groupOnly && !isGroupChannel(opts.channelId)) return { speak: false, reason: "not-group" };
+  if (cfg.groupOnly && !isGroupChannel(opts.channelId, opts.isShared)) return { speak: false, reason: "not-group" };
   if (cfg.onMentionOnly && !opts.mentioned) return { speak: false, reason: "not-mentioned" };
   if (textLen < cfg.minLength) return { speak: false, reason: "too-short" };
   if (textLen > cfg.maxLength) return { speak: false, reason: "too-long" };
@@ -216,21 +220,23 @@ function apply(ctx, config) {
     async onTurnFinish(result) {
       const ctxRef = currentChannelCtx;
       if (!ctxRef) return;
-      const { bot, channelId, platform } = ctxRef;
+      const { bot, channelId, platform, isShared } = ctxRef;
       if (!config.platforms.includes(platform)) return;
       const text = extractReplyText(result.messages);
       if (!text) return;
+      logger.info("voice candidate channel=%s shared=%s text=%s", channelId, isShared, text.slice(0, 40));
       const now = Date.now();
       const decision = decide(policyCfg, {
         text,
         channelId,
+        isShared,
         mentioned: false,
         // onTurnFinish 无 mention 信息；如需 @ 判定改由输入事件侧记录
         now,
         lastSpeakAt: lastSpeakAt.get(channelId) ?? 0
       });
       if (!decision.speak) {
-        logger.debug("skip voice channel=%s reason=%s text=%s", channelId, decision.reason, text.slice(0, 30));
+        logger.info("skip voice channel=%s reason=%s text=%s", channelId, decision.reason, text.slice(0, 30));
         return;
       }
       void (async () => {
@@ -253,7 +259,12 @@ function apply(ctx, config) {
     return;
   }
   yesimbot.registerChannelPlugin(({ bot, scope }) => {
-    currentChannelCtx = { bot, channelId: scope.channelId, platform: scope.platform };
+    currentChannelCtx = {
+      bot,
+      channelId: scope.channelId,
+      platform: scope.platform,
+      isShared: scope.type === "shared"
+    };
     return voicePlugin;
   });
   logger.info("aka-yesimbot-voice registered (platforms=%s)", config.platforms.join(","));
