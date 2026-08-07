@@ -173,7 +173,8 @@ function decide(cfg, opts) {
 // src/sender.ts
 var import_koishi = require("koishi");
 async function sendVoice(bot, channelId, wavPath, platform) {
-  const element = platform === "lark" ? (0, import_koishi.h)("audio", { src: wavPath }) : (0, import_koishi.h)("record", { src: wavPath });
+  const src = `file://${wavPath}`;
+  const element = platform === "lark" ? (0, import_koishi.h)("audio", { src }) : (0, import_koishi.h)("record", { src });
   await bot.sendMessage(channelId, [element]);
 }
 
