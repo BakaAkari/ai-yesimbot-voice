@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1] - 2026-08-07
+
+### 修复
+- **replaceText 收紧为"只吞 yesimbot 回复"**：改用 onAppend 记录 turn 的 `<message>` 段，发送出口只吞"文本与某 turn 回复段一致"的调用——**指令返回文本/其他插件发送永不吞**（此前是全局拦截，可能误吞指令返回）
+- replaceText 模式改为 per-turn 插件实例（registerChannelPlugin resolver 每次 turn 调用），移除单例 currentChannelCtx 状态串扰隐患
+- sendMessage patch 增加防重复标记（`_akaVoicePatched`），避免多 turn 叠加包装
+
 ## [0.1.0] - 2026-08-07
 
 首个发布版本。

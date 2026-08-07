@@ -242,6 +242,7 @@ function apply(ctx, config) {
   };
   const lastSpeakAt = /* @__PURE__ */ new Map();
   const pendingVoice = /* @__PURE__ */ new Map();
+  const turnSegments = /* @__PURE__ */ new Map();
   function consumePending(channelId, bot, platform) {
     const item = pendingVoice.get(channelId);
     if (!item || item.consumed) return;
@@ -295,95 +296,117 @@ function apply(ctx, config) {
     }
     return "";
   }
-  let currentChannelCtx = null;
-  const voicePlugin = {
-    name: "aka-yesimbot-voice",
-    // replaceText 模式下：turn 结束时立即消费（不等防抖）
-    async onTurnFinish(result) {
-      const ctxRef = currentChannelCtx;
-      if (!ctxRef) return;
-      const { bot, channelId, platform } = ctxRef;
-      if (config.replaceText) {
-        const item = pendingVoice.get(channelId);
-        if (item && !item.consumed) {
-          consumePending(channelId, bot, platform);
-        }
-        return;
+  function extractTurnSegments(content) {
+    const text = (() => {
+      if (typeof content === "string") return content;
+      if (Array.isArray(content)) {
+        return content.filter((p) => p && typeof p === "object" && p.type === "text").map((p) => p.text ?? "").join("\n");
       }
-      if (!config.platforms.includes(platform)) return;
-      const text = extractReplyText(result.messages);
-      if (!text) return;
-      logger.info("voice candidate channel=%s shared=%s text=%s", channelId, ctxRef.isShared, text.slice(0, 40));
-      const now = Date.now();
-      const decision = decide(policyCfg, {
-        text,
-        channelId,
-        isShared: ctxRef.isShared,
-        mentioned: false,
-        now,
-        lastSpeakAt: lastSpeakAt.get(channelId) ?? 0
-      });
-      if (!decision.speak) {
-        logger.info("skip voice channel=%s reason=%s text=%s", channelId, decision.reason, text.slice(0, 30));
-        return;
-      }
-      void (async () => {
-        try {
-          const out = await tts.synthesize(text, config.outputDir, `voice-${Date.now()}.wav`);
-          await sendVoice(bot, channelId, out.wavPath, platform, config.napcatHttpUrl);
-          lastSpeakAt.set(channelId, Date.now());
-          logger.info("voice sent channel=%s len=%d dur=%dms wav=%s", channelId, out.pcmBytes, out.durationMs, out.wavPath);
-        } catch (err) {
-          if (config.logFailures) {
-            logger.warn("voice failed channel=%s: %s", channelId, err instanceof Error ? err.message : String(err));
-          }
-        }
-      })();
-    }
-  };
+      return "";
+    })();
+    if (!text) return [];
+    return text.split(/<message\s*\/?\s*>/).map((s) => s.replace(/<\/message>/g, "").trim()).filter(Boolean);
+  }
   const yesimbot = ctx.yesimbot;
   if (!yesimbot?.registerChannelPlugin) {
     logger.warn("yesimbot service unavailable \u2014 plugin inactive");
     return;
   }
   yesimbot.registerChannelPlugin(({ bot, scope }) => {
-    currentChannelCtx = {
-      bot,
-      channelId: scope.channelId,
-      platform: scope.platform,
-      isShared: scope.type === "shared"
-    };
-    if (config.replaceText && config.platforms.includes(scope.platform)) {
+    const channelId = scope.channelId;
+    const platform = scope.platform;
+    const isShared = scope.type === "shared";
+    if (config.replaceText && config.platforms.includes(platform) && !bot._akaVoicePatched) {
+      ;
+      bot._akaVoicePatched = true;
       const origSend = bot.sendMessage.bind(bot);
-      bot.sendMessage = (async (channelId, content, ...rest) => {
+      bot.sendMessage = (async (cid, content, ...rest) => {
         const text = extractSendText(content);
-        const channelIdStr = String(channelId);
-        const now = Date.now();
-        const isShared = scope.type === "shared";
-        if (text && isShared && !pendingVoice.has(channelIdStr)) {
-          const decision = decide(policyCfg, {
-            text,
-            channelId: channelIdStr,
-            isShared,
-            mentioned: false,
-            now,
-            lastSpeakAt: lastSpeakAt.get(channelIdStr) ?? 0
-          });
-          if (decision.speak) {
-            logger.info("text replaced by voice channel=%s reason=%s text=%s", channelIdStr, decision.reason, text.slice(0, 30));
-            queuePending(bot, channelIdStr, scope.platform, text);
-            return [];
+        const cidStr = String(cid);
+        if (text && isShared && !pendingVoice.has(cidStr)) {
+          const segments = turnSegments.get(cidStr) ?? [];
+          const isTurnReply = segments.includes(text);
+          if (isTurnReply) {
+            const decision = decide(policyCfg, {
+              text,
+              channelId: cidStr,
+              isShared,
+              mentioned: false,
+              now: Date.now(),
+              lastSpeakAt: lastSpeakAt.get(cidStr) ?? 0
+            });
+            if (decision.speak) {
+              logger.info("text replaced by voice channel=%s text=%s", cidStr, text.slice(0, 30));
+              queuePending(bot, cidStr, platform, text);
+              return [];
+            }
+            logger.info("text kept (voice skip) channel=%s reason=%s text=%s", cidStr, decision.reason, text.slice(0, 30));
           }
-          logger.info("text kept (voice skip) channel=%s reason=%s text=%s", channelIdStr, decision.reason, text.slice(0, 30));
-        } else if (text && pendingVoice.has(channelIdStr)) {
-          queuePending(bot, channelIdStr, scope.platform, text);
+        } else if (text && pendingVoice.has(cidStr)) {
+          queuePending(bot, cidStr, platform, text);
           return [];
         }
-        return origSend(channelId, content, ...rest);
+        return origSend(cid, content, ...rest);
       });
-      logger.info("aka-yesimbot-voice: sendMessage patched for channel %s (replaceText)", scope.channelId);
+      logger.info("aka-yesimbot-voice: sendMessage patched (replaceText)");
     }
-    return voicePlugin;
+    const plugin = {
+      name: "aka-yesimbot-voice",
+      // 记录本 turn 的 <message> 段，供 sendMessage patch 匹配（只吞 yesimbot 回复）
+      async onAppend(entries) {
+        if (!config.replaceText) return;
+        for (const entry of entries) {
+          if (entry?.type !== "message") continue;
+          const data = entry.data;
+          if (data?.role !== "assistant") continue;
+          const segments = extractTurnSegments(data.content);
+          if (segments.length > 0) {
+            turnSegments.set(channelId, segments);
+          }
+        }
+      },
+      // replaceText 模式：turn 结束立即消费；旧模式：文本照发语音附带
+      async onTurnFinish(result) {
+        if (config.replaceText) {
+          turnSegments.delete(channelId);
+          const item = pendingVoice.get(channelId);
+          if (item && !item.consumed) {
+            consumePending(channelId, bot, platform);
+          }
+          return;
+        }
+        if (!config.platforms.includes(platform)) return;
+        const text = extractReplyText(result.messages);
+        if (!text) return;
+        logger.info("voice candidate channel=%s shared=%s text=%s", channelId, isShared, text.slice(0, 40));
+        const now = Date.now();
+        const decision = decide(policyCfg, {
+          text,
+          channelId,
+          isShared,
+          mentioned: false,
+          now,
+          lastSpeakAt: lastSpeakAt.get(channelId) ?? 0
+        });
+        if (!decision.speak) {
+          logger.info("skip voice channel=%s reason=%s text=%s", channelId, decision.reason, text.slice(0, 30));
+          return;
+        }
+        void (async () => {
+          try {
+            const out = await tts.synthesize(text, config.outputDir, `voice-${Date.now()}.wav`);
+            await sendVoice(bot, channelId, out.wavPath, platform, config.napcatHttpUrl);
+            lastSpeakAt.set(channelId, Date.now());
+            logger.info("voice sent channel=%s len=%d dur=%dms wav=%s", channelId, out.pcmBytes, out.durationMs, out.wavPath);
+          } catch (err) {
+            if (config.logFailures) {
+              logger.warn("voice failed channel=%s: %s", channelId, err instanceof Error ? err.message : String(err));
+            }
+          }
+        })();
+      }
+    };
+    return plugin;
   });
   logger.info("aka-yesimbot-voice registered (platforms=%s, replaceText=%s)", config.platforms.join(","), config.replaceText);
 }

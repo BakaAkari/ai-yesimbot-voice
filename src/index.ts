@@ -1,5 +1,5 @@
-import { Context, Schema, Logger, h, type Bot } from 'koishi'
-import type { AgentPlugin, TurnResult, AgentEntry } from '@yesimbot/agent-runtime'
+import { Context, Schema, Logger, type Bot } from 'koishi'
+import type { AgentPlugin, TurnResult } from '@yesimbot/agent-runtime'
 import { TtsClient, type TtsClientConfig } from './tts-client.js'
 import { extractReplyText } from './text-extract.js'
 import { decide, type TtsPolicyConfig } from './policy.js'
@@ -86,9 +86,12 @@ export function apply(ctx: Context, config: Config) {
   // 每个 channel 独立冷却
   const lastSpeakAt = new Map<string, number>()
 
-  // —— replaceText 模式：吞掉的待发语音（channelId -> 合并后的文本）——
-  // 消费用防抖，避免 turn 内多段 <message> 各自触发
+  // —— replaceText 模式 ——
+  // 待发语音队列（channelId -> 文本），消费防抖 600ms，turn 结束时立即消费
   const pendingVoice = new Map<string, { text: string; timer: ReturnType<typeof setTimeout>; consumed: boolean }>()
+  // 每个 channel 最近 turn 的 <message> 段（onAppend 记录，patch 匹配用）
+  // 只吞"发送文本 == 某 turn 回复段"的调用 → 指令返回/其他插件发送永不吞
+  const turnSegments = new Map<string, string[]>()
 
   function consumePending(channelId: string, bot: Bot, platform: string): void {
     const item = pendingVoice.get(channelId)
@@ -152,108 +155,134 @@ export function apply(ctx: Context, config: Config) {
     return ''
   }
 
-  type ChannelRef = { bot: Parameters<typeof sendVoice>[0]; channelId: string; platform: string; isShared: boolean }
-  let currentChannelCtx: ChannelRef | null = null
-
-  const voicePlugin: AgentPlugin = {
-    name: 'aka-yesimbot-voice',
-    // replaceText 模式下：turn 结束时立即消费（不等防抖）
-    async onTurnFinish(result) {
-      const ctxRef = currentChannelCtx
-      if (!ctxRef) return
-      const { bot, channelId, platform } = ctxRef
-      if (config.replaceText) {
-        const item = pendingVoice.get(channelId)
-        if (item && !item.consumed) {
-          consumePending(channelId, bot, platform)
-        }
-        return
+  // 从 assistant content 提取 <message> 段（保留标签边界）
+  function extractTurnSegments(content: unknown): string[] {
+    const text = (() => {
+      if (typeof content === 'string') return content
+      if (Array.isArray(content)) {
+        return content
+          .filter((p) => p && typeof p === 'object' && (p as { type?: string }).type === 'text')
+          .map((p) => ((p as { text?: unknown }).text ?? '') as string)
+          .join('\n')
       }
-      // —— 旧模式：文本照发，语音附带 ——
-      if (!config.platforms.includes(platform)) return
-      const text = extractReplyText(result.messages)
-      if (!text) return
-      logger.info('voice candidate channel=%s shared=%s text=%s', channelId, ctxRef.isShared, text.slice(0, 40))
-
-      const now = Date.now()
-      const decision = decide(policyCfg, {
-        text,
-        channelId,
-        isShared: ctxRef.isShared,
-        mentioned: false,
-        now,
-        lastSpeakAt: lastSpeakAt.get(channelId) ?? 0,
-      })
-      if (!decision.speak) {
-        logger.info('skip voice channel=%s reason=%s text=%s', channelId, decision.reason, text.slice(0, 30))
-        return
-      }
-
-      void (async () => {
-        try {
-          const out = await tts.synthesize(text, config.outputDir, `voice-${Date.now()}.wav`)
-          await sendVoice(bot, channelId, out.wavPath, platform, config.napcatHttpUrl)
-          lastSpeakAt.set(channelId, Date.now())
-          logger.info('voice sent channel=%s len=%d dur=%dms wav=%s', channelId, out.pcmBytes, out.durationMs, out.wavPath)
-        } catch (err) {
-          if (config.logFailures) {
-            logger.warn('voice failed channel=%s: %s', channelId, err instanceof Error ? err.message : String(err))
-          }
-        }
-      })()
-    },
+      return ''
+    })()
+    if (!text) return []
+    return text
+      .split(/<message\s*\/?\s*>/)
+      .map((s) => s.replace(/<\/message>/g, '').trim())
+      .filter(Boolean)
   }
 
-  // inject 声明保证 yesimbot service 已注册（若存在）；apply 时直接注册 channel plugin
   const yesimbot = (ctx as any).yesimbot
   if (!yesimbot?.registerChannelPlugin) {
     logger.warn('yesimbot service unavailable — plugin inactive')
     return
   }
   yesimbot.registerChannelPlugin(({ bot, scope }: any) => {
-    currentChannelCtx = {
-      bot,
-      channelId: scope.channelId,
-      platform: scope.platform,
-      isShared: scope.type === 'shared',
-    }
+    const channelId: string = scope.channelId
+    const platform: string = scope.platform
+    const isShared: boolean = scope.type === 'shared'
 
-    // replaceText 模式：patch 发送出口，命中语音策略时吞掉文本
-    if (config.replaceText && config.platforms.includes(scope.platform)) {
+    // replaceText 模式：patch 发送出口（每 bot 只 patch 一次）。
+    // 只吞"发送文本 == 本 channel 最近 turn 的某个 <message> 段"的调用：
+    //   - yesimbot 回复段 → 匹配 → 策略判定后吞（只发语音）
+    //   - 指令返回 / 其他插件发送 → 文本不在段列表 → 永不吞
+    if (config.replaceText && config.platforms.includes(platform) && !(bot as any)._akaVoicePatched) {
+      ;(bot as any)._akaVoicePatched = true
       const origSend = bot.sendMessage.bind(bot)
-      bot.sendMessage = (async (channelId: string, content: unknown, ...rest: unknown[]) => {
+      bot.sendMessage = (async (cid: string, content: unknown, ...rest: unknown[]) => {
         const text = extractSendText(content)
-        const channelIdStr = String(channelId)
-        const now = Date.now()
-        const isShared = scope.type === 'shared'
-        // 仅群聊 + 策略命中 → 吞文本排队语音；否则原样发送
-        // 注意：冷却判定交给 decide()（now - lastSpeakAt < cooldownSeconds），
-        // 不能用 lastSpeakAt.has() 存在性判断（历史语音记录会永久跳过判定）
-        if (text && isShared && !pendingVoice.has(channelIdStr)) {
-          const decision = decide(policyCfg, {
-            text,
-            channelId: channelIdStr,
-            isShared,
-            mentioned: false,
-            now,
-            lastSpeakAt: lastSpeakAt.get(channelIdStr) ?? 0,
-          })
-          if (decision.speak) {
-            logger.info('text replaced by voice channel=%s reason=%s text=%s', channelIdStr, decision.reason, text.slice(0, 30))
-            queuePending(bot, channelIdStr, scope.platform, text)
-            return []
+        const cidStr = String(cid)
+        if (text && isShared && !pendingVoice.has(cidStr)) {
+          const segments = turnSegments.get(cidStr) ?? []
+          const isTurnReply = segments.includes(text)
+          if (isTurnReply) {
+            const decision = decide(policyCfg, {
+              text,
+              channelId: cidStr,
+              isShared,
+              mentioned: false,
+              now: Date.now(),
+              lastSpeakAt: lastSpeakAt.get(cidStr) ?? 0,
+            })
+            if (decision.speak) {
+              logger.info('text replaced by voice channel=%s text=%s', cidStr, text.slice(0, 30))
+              queuePending(bot, cidStr, platform, text)
+              return []
+            }
+            logger.info('text kept (voice skip) channel=%s reason=%s text=%s', cidStr, decision.reason, text.slice(0, 30))
           }
-          logger.info('text kept (voice skip) channel=%s reason=%s text=%s', channelIdStr, decision.reason, text.slice(0, 30))
-        } else if (text && pendingVoice.has(channelIdStr)) {
+          // 非 turn 回复（指令等）→ 原样发送
+        } else if (text && pendingVoice.has(cidStr)) {
           // 同 turn 后续段落：并入语音文本，继续吞
-          queuePending(bot, channelIdStr, scope.platform, text)
+          queuePending(bot, cidStr, platform, text)
           return []
         }
-        return origSend(channelId, content, ...rest)
+        return origSend(cid, content, ...rest)
       }) as typeof bot.sendMessage
-      logger.info('aka-yesimbot-voice: sendMessage patched for channel %s (replaceText)', scope.channelId)
+      logger.info('aka-yesimbot-voice: sendMessage patched (replaceText)')
     }
-    return voicePlugin
+
+    const plugin: AgentPlugin = {
+      name: 'aka-yesimbot-voice',
+      // 记录本 turn 的 <message> 段，供 sendMessage patch 匹配（只吞 yesimbot 回复）
+      async onAppend(entries) {
+        if (!config.replaceText) return
+        for (const entry of entries) {
+          if (entry?.type !== 'message') continue
+          const data = entry.data as { role?: string; content?: unknown } | undefined
+          if (data?.role !== 'assistant') continue
+          const segments = extractTurnSegments(data.content)
+          if (segments.length > 0) {
+            turnSegments.set(channelId, segments)
+          }
+        }
+      },
+      // replaceText 模式：turn 结束立即消费；旧模式：文本照发语音附带
+      async onTurnFinish(result: TurnResult) {
+        if (config.replaceText) {
+          turnSegments.delete(channelId)
+          const item = pendingVoice.get(channelId)
+          if (item && !item.consumed) {
+            consumePending(channelId, bot, platform)
+          }
+          return
+        }
+        if (!config.platforms.includes(platform)) return
+        const text = extractReplyText(result.messages)
+        if (!text) return
+        logger.info('voice candidate channel=%s shared=%s text=%s', channelId, isShared, text.slice(0, 40))
+
+        const now = Date.now()
+        const decision = decide(policyCfg, {
+          text,
+          channelId,
+          isShared,
+          mentioned: false,
+          now,
+          lastSpeakAt: lastSpeakAt.get(channelId) ?? 0,
+        })
+        if (!decision.speak) {
+          logger.info('skip voice channel=%s reason=%s text=%s', channelId, decision.reason, text.slice(0, 30))
+          return
+        }
+
+        void (async () => {
+          try {
+            const out = await tts.synthesize(text, config.outputDir, `voice-${Date.now()}.wav`)
+            await sendVoice(bot, channelId, out.wavPath, platform, config.napcatHttpUrl)
+            lastSpeakAt.set(channelId, Date.now())
+            logger.info('voice sent channel=%s len=%d dur=%dms wav=%s', channelId, out.pcmBytes, out.durationMs, out.wavPath)
+          } catch (err) {
+            if (config.logFailures) {
+              logger.warn('voice failed channel=%s: %s', channelId, err instanceof Error ? err.message : String(err))
+            }
+          }
+        })()
+      },
+    }
+    return plugin
   })
   logger.info('aka-yesimbot-voice registered (platforms=%s, replaceText=%s)', config.platforms.join(','), config.replaceText)
 }
