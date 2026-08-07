@@ -7,6 +7,9 @@ import { sendVoice } from './sender.js'
 
 export const name = 'aka-yesimbot-voice'
 
+/** 依赖 yesimbot service（可选：未启用时插件静默跳过） */
+export const inject = { optional: ['yesimbot'] }
+
 export interface Config {
   /** 总开关 */
   ttsEnabled: boolean
@@ -120,16 +123,15 @@ export function apply(ctx: Context, config: Config) {
     },
   }
 
-  ctx.on('ready', async () => {
-    const yesimbot = (ctx as any).yesimbot
-    if (!yesimbot?.registerChannelPlugin) {
-      logger.warn('yesimbot service unavailable — plugin inactive')
-      return
-    }
-    yesimbot.registerChannelPlugin(({ bot, scope }: any) => {
-      currentChannelCtx = { bot, channelId: scope.channelId, platform: scope.platform }
-      return voicePlugin
-    })
-    logger.info('aka-yesimbot-voice registered (platforms=%s)', config.platforms.join(','))
+  // inject 声明保证 yesimbot service 已注册（若存在）；apply 时直接注册 channel plugin
+  const yesimbot = (ctx as any).yesimbot
+  if (!yesimbot?.registerChannelPlugin) {
+    logger.warn('yesimbot service unavailable — plugin inactive')
+    return
+  }
+  yesimbot.registerChannelPlugin(({ bot, scope }: any) => {
+    currentChannelCtx = { bot, channelId: scope.channelId, platform: scope.platform }
+    return voicePlugin
   })
+  logger.info('aka-yesimbot-voice registered (platforms=%s)', config.platforms.join(','))
 }

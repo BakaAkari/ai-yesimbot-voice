@@ -32,6 +32,7 @@ var index_exports = {};
 __export(index_exports, {
   Config: () => Config,
   apply: () => apply,
+  inject: () => inject,
   name: () => name
 });
 module.exports = __toCommonJS(index_exports);
@@ -174,6 +175,7 @@ async function sendVoice(bot, channelId, wavPath, platform) {
 
 // src/index.ts
 var name = "aka-yesimbot-voice";
+var inject = { optional: ["yesimbot"] };
 var Config = import_koishi2.Schema.object({
   ttsEnabled: import_koishi2.Schema.boolean().default(true).description("\u603B\u5F00\u5173\uFF1A\u5F00\u542F\u540E bot \u56DE\u590D\u6309\u7B56\u7565\u9644\u5E26\u8BED\u97F3"),
   platforms: import_koishi2.Schema.array(String).default(["onebot"]).description("\u751F\u6548\u5E73\u53F0\uFF1Aonebot\uFF08QQ\uFF09/ lark\uFF08\u98DE\u4E66\uFF09"),
@@ -245,23 +247,22 @@ function apply(ctx, config) {
       })();
     }
   };
-  ctx.on("ready", async () => {
-    const yesimbot = ctx.yesimbot;
-    if (!yesimbot?.registerChannelPlugin) {
-      logger.warn("yesimbot service unavailable \u2014 plugin inactive");
-      return;
-    }
-    yesimbot.registerChannelPlugin(({ bot, scope }) => {
-      currentChannelCtx = { bot, channelId: scope.channelId, platform: scope.platform };
-      return voicePlugin;
-    });
-    logger.info("aka-yesimbot-voice registered (platforms=%s)", config.platforms.join(","));
+  const yesimbot = ctx.yesimbot;
+  if (!yesimbot?.registerChannelPlugin) {
+    logger.warn("yesimbot service unavailable \u2014 plugin inactive");
+    return;
+  }
+  yesimbot.registerChannelPlugin(({ bot, scope }) => {
+    currentChannelCtx = { bot, channelId: scope.channelId, platform: scope.platform };
+    return voicePlugin;
   });
+  logger.info("aka-yesimbot-voice registered (platforms=%s)", config.platforms.join(","));
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   Config,
   apply,
+  inject,
   name
 });
 //# sourceMappingURL=index.js.map

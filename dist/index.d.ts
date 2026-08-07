@@ -1,6 +1,10 @@
 import { Schema, Context } from 'koishi';
 
 declare const name = "aka-yesimbot-voice";
+/** 依赖 yesimbot service（可选：未启用时插件静默跳过） */
+declare const inject: {
+    optional: string[];
+};
 interface Config {
     /** 总开关 */
     ttsEnabled: boolean;
@@ -34,4 +38,4 @@ interface Config {
 declare const Config: Schema<Config>;
 declare function apply(ctx: Context, config: Config): void;
 
-export { Config, apply, name };
+export { Config, apply, inject, name };
