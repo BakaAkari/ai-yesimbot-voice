@@ -1,10 +1,8 @@
 import { Schema, Context } from 'koishi';
 
 declare const name = "aka-yesimbot-voice";
-/** 依赖 yesimbot service（可选：未启用时插件静默跳过） */
-declare const inject: {
-    optional: string[];
-};
+/** 依赖 yesimbot service（必选：Koishi 保证在 yesimbot 注册后加载本插件） */
+declare const inject: string[];
 interface Config {
     /** 总开关 */
     ttsEnabled: boolean;

@@ -175,7 +175,7 @@ async function sendVoice(bot, channelId, wavPath, platform) {
 
 // src/index.ts
 var name = "aka-yesimbot-voice";
-var inject = { optional: ["yesimbot"] };
+var inject = ["yesimbot"];
 var Config = import_koishi2.Schema.object({
   ttsEnabled: import_koishi2.Schema.boolean().default(true).description("\u603B\u5F00\u5173\uFF1A\u5F00\u542F\u540E bot \u56DE\u590D\u6309\u7B56\u7565\u9644\u5E26\u8BED\u97F3"),
   platforms: import_koishi2.Schema.array(String).default(["onebot"]).description("\u751F\u6548\u5E73\u53F0\uFF1Aonebot\uFF08QQ\uFF09/ lark\uFF08\u98DE\u4E66\uFF09"),

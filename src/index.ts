@@ -7,8 +7,8 @@ import { sendVoice } from './sender.js'
 
 export const name = 'aka-yesimbot-voice'
 
-/** 依赖 yesimbot service（可选：未启用时插件静默跳过） */
-export const inject = { optional: ['yesimbot'] }
+/** 依赖 yesimbot service（必选：Koishi 保证在 yesimbot 注册后加载本插件） */
+export const inject = ['yesimbot']
 
 export interface Config {
   /** 总开关 */
