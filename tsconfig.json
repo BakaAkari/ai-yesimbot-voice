@@ -9,5 +9,8 @@
   },
   "include": [
     "src/**/*.ts"
-  ]
+  ],
+  "paths": {
+    "koishi-plugin-yesimbot": ["./node_modules/koishi-plugin-yesimbot/index.d.ts"]
+  }
 }
