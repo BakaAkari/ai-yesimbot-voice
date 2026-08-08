@@ -412,7 +412,7 @@ var Config = import_koishi2.Schema.object({
   napcatHttpUrl: import_koishi2.Schema.string().default("").description("NapCat HTTP API \u5730\u5740\uFF0C\u5982 http://mita_napcat:6199\uFF1BQQ \u8BED\u97F3\u76F4\u53D1\u8D70\u6B64\u901A\u9053\uFF0C\u7559\u7A7A\u56DE\u9000 Koishi \u5143\u7D20\u53D1\u9001\uFF08\u672C\u5730\u5F00\u53D1\uFF09"),
   replaceText: import_koishi2.Schema.boolean().default(false).description("\u547D\u4E2D\u8BED\u97F3\u65F6\u541E\u6389 yesimbot \u6587\u672C\u56DE\u590D\uFF0C\u53EA\u53D1\u8BED\u97F3\uFF08TTS \u5931\u8D25\u81EA\u52A8\u8865\u53D1\u6587\u672C\uFF09"),
   llm: import_koishi2.Schema.object({
-    enabled: import_koishi2.Schema.boolean().default(false).description("LLM \u8BED\u97F3\u6548\u679C\u6E32\u67D3\uFF08\u9ED8\u8BA4\u5173\uFF0C\u5F00\u542F\u4F1A\u4EA7\u751F\u6A21\u578B\u8C03\u7528\uFF09"),
+    enabled: import_koishi2.Schema.boolean().default(true).description("LLM \u8BED\u97F3\u6548\u679C\u6E32\u67D3\uFF08\u9ED8\u8BA4\u5F00\uFF0C\u8D70 yesimbot \u4E3B\u6A21\u578B\u901A\u9053\uFF09"),
     source: import_koishi2.Schema.union(["yesimbot", "custom"]).default("yesimbot").description("LLM \u901A\u9053\uFF1Ayesimbot \u4E3B\u6A21\u578B / \u72EC\u7ACB\u914D\u7F6E"),
     model: import_koishi2.Schema.string().default("").description("yesimbot \u6A21\u578B fullId\uFF08\u5982 deepseek:deepseek-v4-flash\uFF09\uFF1B\u7A7A = yesimbot \u9ED8\u8BA4\u4E3B\u6A21\u578B"),
     apiBase: import_koishi2.Schema.string().default("").description("\u72EC\u7ACB\u901A\u9053 baseURL\uFF08source=custom \u751F\u6548\uFF09"),

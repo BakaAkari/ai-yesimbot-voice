@@ -92,7 +92,7 @@ export const Config: Schema<Config> = Schema.object({
   napcatHttpUrl: Schema.string().default('').description('NapCat HTTP API 地址，如 http://mita_napcat:6199；QQ 语音直发走此通道，留空回退 Koishi 元素发送（本地开发）'),
   replaceText: Schema.boolean().default(false).description('命中语音时吞掉 yesimbot 文本回复，只发语音（TTS 失败自动补发文本）'),
   llm: Schema.object({
-    enabled: Schema.boolean().default(false).description('LLM 语音效果渲染（默认关，开启会产生模型调用）'),
+    enabled: Schema.boolean().default(true).description('LLM 语音效果渲染（默认开，走 yesimbot 主模型通道）'),
     source: Schema.union(['yesimbot', 'custom'] as const).default('yesimbot').description('LLM 通道：yesimbot 主模型 / 独立配置'),
     model: Schema.string().default('').description('yesimbot 模型 fullId（如 deepseek:deepseek-v4-flash）；空 = yesimbot 默认主模型'),
     apiBase: Schema.string().default('').description('独立通道 baseURL（source=custom 生效）'),
