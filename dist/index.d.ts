@@ -36,6 +36,20 @@ interface Config {
     napcatHttpUrl: string;
     /** 发语音时吞掉 yesimbot 文本（只发语音，不发文本） */
     replaceText: boolean;
+    /** LLM 语音效果渲染 */
+    llm: {
+        enabled: boolean;
+        source: 'yesimbot' | 'custom';
+        model: string;
+        apiBase: string;
+        apiKey: string;
+        customModel: string;
+        timeoutMs: number;
+        prompt: string;
+        fidelityRatio: number;
+        injectBreath: boolean;
+        logPrompts: boolean;
+    };
 }
 declare const Config: Schema<Config>;
 declare function apply(ctx: Context, config: Config): void;

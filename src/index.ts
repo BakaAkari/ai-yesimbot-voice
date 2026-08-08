@@ -4,6 +4,21 @@ import { TtsClient, type TtsClientConfig } from './tts-client.js'
 import { extractReplyText } from './text-extract.js'
 import { decide, type TtsPolicyConfig } from './policy.js'
 import { sendVoice } from './sender.js'
+import { render, type RenderOptions } from './preprocess.js'
+import { fromYesimbot, fromCustom, type LlmChannel } from './llm-channel.js'
+
+const DEFAULT_LLM_PROMPT = `你是专业的声音导演。把下面的对话回复改写成"朗读友好文本"，交给 CosyVoice 合成语音。
+要求：
+1. 保留原意与信息，不得增删事实、不得改人称/数字/专有名词
+2. 加入自然的口语节奏：适当断句、停顿提示、语气词（嗯、啊、哈），增强情绪表达
+3. 文本中可用以下标记控制韵律：[breath] 换气 [laughter] 笑声 [sigh] 叹气（适量使用，每句最多 1 个）
+4. 标点规范化：句末必须有句号/问号/感叹号；逗号表示短停顿，句号表示长停顿
+5. 英文单词保持原样，前后加空格；数字按自然读法改写（如 3.5 → 三点五）
+6. 只输出改写后的文本本身，不要解释、不要引号、不要 markdown
+7. 输出长度与原文本相当（±30%），不得扩写
+
+原文：
+{text}`
 
 export const name = 'aka-yesimbot-voice'
 
@@ -43,6 +58,20 @@ export interface Config {
   napcatHttpUrl: string
   /** 发语音时吞掉 yesimbot 文本（只发语音，不发文本） */
   replaceText: boolean
+  /** LLM 语音效果渲染 */
+  llm: {
+    enabled: boolean
+    source: 'yesimbot' | 'custom'
+    model: string
+    apiBase: string
+    apiKey: string
+    customModel: string
+    timeoutMs: number
+    prompt: string
+    fidelityRatio: number
+    injectBreath: boolean
+    logPrompts: boolean
+  }
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -62,6 +91,19 @@ export const Config: Schema<Config> = Schema.object({
   logFailures: Schema.boolean().default(true).description('合成/发送失败写告警日志（不影响文本回复）'),
   napcatHttpUrl: Schema.string().default('').description('NapCat HTTP API 地址，如 http://mita_napcat:6199；QQ 语音直发走此通道，留空回退 Koishi 元素发送（本地开发）'),
   replaceText: Schema.boolean().default(false).description('命中语音时吞掉 yesimbot 文本回复，只发语音（TTS 失败自动补发文本）'),
+  llm: Schema.object({
+    enabled: Schema.boolean().default(false).description('LLM 语音效果渲染（默认关，开启会产生模型调用）'),
+    source: Schema.union(['yesimbot', 'custom'] as const).default('yesimbot').description('LLM 通道：yesimbot 主模型 / 独立配置'),
+    model: Schema.string().default('').description('yesimbot 模型 fullId（如 deepseek:deepseek-v4-flash）；空 = yesimbot 默认主模型'),
+    apiBase: Schema.string().default('').description('独立通道 baseURL（source=custom 生效）'),
+    apiKey: Schema.string().role('secret').default('').description('独立通道 API Key（source=custom 生效；不写日志）'),
+    customModel: Schema.string().default('').description('独立通道模型名（source=custom 生效）'),
+    timeoutMs: Schema.number().min(1000).max(120000).default(60000).description('LLM 调用超时 ms，超时降级原文'),
+    prompt: Schema.string().role('textarea').default(DEFAULT_LLM_PROMPT).description('改写指令模板（{text} 占位）'),
+    fidelityRatio: Schema.number().min(0).max(1).step(0.01).default(0.95).description('内容保真阈值 0-1，低于则回退规则层结果'),
+    injectBreath: Schema.boolean().default(true).description('LLM 之后按规则注入 [breath] 换气'),
+    logPrompts: Schema.boolean().default(false).description('调试：日志输出改写前后文本（不含 key）'),
+  }).description('LLM 语音效果渲染'),
 })
 
 export function apply(ctx: Context, config: Config) {
@@ -72,6 +114,34 @@ export function apply(ctx: Context, config: Config) {
     voicePromptPath: config.voicePromptPath,
     instructText: config.instructText,
   } satisfies TtsClientConfig)
+
+  // 语音效果渲染通道（enabled=false → 只跑规则层；yesimbot 通道构建失败自动降级到 custom / 规则层）
+  const llmCfg = config.llm
+  let llmChannel: LlmChannel | null = null
+  if (llmCfg.enabled) {
+    if (llmCfg.source === 'yesimbot') {
+      llmChannel = fromYesimbot(ctx, { modelId: llmCfg.model, logger })
+      if (!llmChannel) logger.warn('llm channel yesimbot unavailable — falling back to rules')
+    } else if (llmCfg.source === 'custom') {
+      if (llmCfg.apiBase && llmCfg.customModel) {
+        llmChannel = fromCustom({ apiBase: llmCfg.apiBase, apiKey: llmCfg.apiKey, model: llmCfg.customModel })
+      } else {
+        logger.warn('llm channel custom missing apiBase/customModel — falling back to rules')
+      }
+    }
+  }
+  const renderOpts: RenderOptions = {
+    llm: llmChannel,
+    fidelityRatio: llmCfg.fidelityRatio,
+    injectBreath: llmCfg.injectBreath,
+    timeoutMs: llmCfg.timeoutMs,
+    prompt: llmCfg.prompt || DEFAULT_LLM_PROMPT,
+    logPrompts: llmCfg.logPrompts,
+    logger,
+  }
+  async function renderVoice(text: string) {
+    return render(text, renderOpts)
+  }
 
   const policyCfg: TtsPolicyConfig = {
     ttsEnabled: config.ttsEnabled,
@@ -102,10 +172,15 @@ export function apply(ctx: Context, config: Config) {
     const text = item.text
     void (async () => {
       try {
-        const out = await tts.synthesize(text, config.outputDir, `voice-${Date.now()}.wav`)
+        const rendered = await renderVoice(text)
+        const out = await tts.synthesize(rendered.text, config.outputDir, `voice-${Date.now()}.wav`)
         await sendVoice(bot, channelId, out.wavPath, platform, config.napcatHttpUrl)
         lastSpeakAt.set(channelId, Date.now())
-        logger.info('voice sent (text replaced) channel=%s len=%d dur=%dms text=%s', channelId, out.pcmBytes, out.durationMs, text.slice(0, 30))
+        logger.info(
+          'voice sent (text replaced) channel=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s rendered=%s',
+          channelId, out.pcmBytes, out.durationMs, rendered.source, rendered.ratio.toFixed(3), rendered.degraded,
+          rendered.reason ? ` reason=${rendered.reason}` : '', rendered.text.slice(0, 40),
+        )
       } catch (err) {
         // TTS/发送失败：补发文本，保证回复不丢
         logger.warn('voice failed, fallback text channel=%s: %s', channelId, err instanceof Error ? err.message : String(err))
@@ -270,10 +345,15 @@ export function apply(ctx: Context, config: Config) {
 
         void (async () => {
           try {
-            const out = await tts.synthesize(text, config.outputDir, `voice-${Date.now()}.wav`)
+            const rendered = await renderVoice(text)
+            const out = await tts.synthesize(rendered.text, config.outputDir, `voice-${Date.now()}.wav`)
             await sendVoice(bot, channelId, out.wavPath, platform, config.napcatHttpUrl)
             lastSpeakAt.set(channelId, Date.now())
-            logger.info('voice sent channel=%s len=%d dur=%dms wav=%s', channelId, out.pcmBytes, out.durationMs, out.wavPath)
+            logger.info(
+              'voice sent channel=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s wav=%s',
+              channelId, out.pcmBytes, out.durationMs, rendered.source, rendered.ratio.toFixed(3), rendered.degraded,
+              rendered.reason ? ` reason=${rendered.reason}` : '', out.wavPath,
+            )
           } catch (err) {
             if (config.logFailures) {
               logger.warn('voice failed channel=%s: %s', channelId, err instanceof Error ? err.message : String(err))
@@ -284,5 +364,10 @@ export function apply(ctx: Context, config: Config) {
     }
     return plugin
   })
-  logger.info('aka-yesimbot-voice registered (platforms=%s, replaceText=%s)', config.platforms.join(','), config.replaceText)
+  logger.info(
+    'aka-yesimbot-voice registered (platforms=%s, replaceText=%s, llm=%s%s)',
+    config.platforms.join(','), config.replaceText,
+    llmCfg.enabled ? (llmChannel ? llmChannel.source : 'rules-fallback') : 'off',
+    llmCfg.enabled && llmChannel ? `, breath=${llmCfg.injectBreath}` : '',
+  )
 }

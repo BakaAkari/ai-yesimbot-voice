@@ -202,7 +202,196 @@ async function sendViaNapcat(baseUrl, channelId, wavPath) {
   }
 }
 
+// src/preprocess.ts
+async function render(input, opts) {
+  const rules = ruleLayer(input);
+  if (!opts.llm) {
+    const text2 = opts.injectBreath ? injectBreath(rules) : rules;
+    return { text: text2, ratio: 1, source: "rules", degraded: false };
+  }
+  let raw = null;
+  let failReason;
+  try {
+    raw = await opts.llm.rewrite(rules, opts.prompt, opts.timeoutMs);
+  } catch (err) {
+    failReason = err instanceof Error ? err.message : String(err);
+    raw = null;
+  }
+  if (opts.logPrompts && opts.logger) {
+    opts.logger.info(
+      "llm prompt in=%s out=%s",
+      rules.slice(0, 80),
+      (raw ?? "<null>").slice(0, 80)
+    );
+  }
+  const trimmed = raw?.trim() ?? "";
+  if (!trimmed) {
+    if (failReason && opts.logger) opts.logger.warn("llm rewrite failed: %s", failReason);
+    const text2 = opts.injectBreath ? injectBreath(rules) : rules;
+    return { text: text2, ratio: 1, source: "rules", degraded: true, reason: failReason ?? "empty" };
+  }
+  const ratio = fidelityRatio(rules, trimmed);
+  if (ratio < opts.fidelityRatio) {
+    const text2 = opts.injectBreath ? injectBreath(rules) : rules;
+    return { text: text2, ratio, source: "rules", degraded: true, reason: "fidelity" };
+  }
+  const text = opts.injectBreath ? injectBreath(trimmed) : trimmed;
+  return { text, ratio, source: "llm", degraded: false };
+}
+function ruleLayer(text) {
+  if (!text) return "";
+  let s = text.replace(/\r\n?/g, "\n").trim();
+  s = s.replace(/[ \t]+/g, " ");
+  s = s.replace(/([。！？!?])\1+/g, "$1");
+  s = s.replace(/([，,、;；])\1+/g, "$1");
+  s = s.replace(/([一-龥])([A-Za-z0-9])/g, "$1 $2");
+  s = s.replace(/([A-Za-z0-9])([一-龥])/g, "$1 $2");
+  if (s) {
+    const tail = s.slice(-1);
+    if (!/[。！？!?…\.]/.test(tail)) {
+      if (/[一-龥]/.test(tail)) s += "\u3002";
+      else if (/[A-Za-z0-9]/.test(tail)) s += ".";
+    }
+  }
+  return s;
+}
+function fidelityRatio(a, b) {
+  const [aa, bb] = pickCharSeq(a, b);
+  if (!aa.length && !bb.length) return 1;
+  if (!aa.length || !bb.length) return 0;
+  const lcs = lcsLength(aa, bb);
+  return 2 * lcs / (aa.length + bb.length);
+}
+function pickCharSeq(a, b) {
+  const ac = a.match(/[一-龥]/g)?.join("") ?? "";
+  const bc = b.match(/[一-龥]/g)?.join("") ?? "";
+  if (ac || bc) return [ac, bc];
+  const strip = (s) => s.replace(/\[[a-zA-Z_]+\]/g, "").replace(/\s+/g, "").toLowerCase();
+  return [strip(a), strip(b)];
+}
+function lcsLength(a, b) {
+  const m = a.length;
+  const n = b.length;
+  if (!m || !n) return 0;
+  let prev = new Array(n + 1).fill(0);
+  let curr = new Array(n + 1).fill(0);
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const pj = prev[j] ?? 0;
+      const cj1 = curr[j - 1] ?? 0;
+      if (a[i - 1] === b[j - 1]) curr[j] = (prev[j - 1] ?? 0) + 1;
+      else curr[j] = pj >= cj1 ? pj : cj1;
+    }
+    const tmp = prev;
+    prev = curr;
+    curr = tmp;
+    curr.fill(0);
+  }
+  return prev[n] ?? 0;
+}
+var BREATH_MARK_RE = /\[(breath|quick_breath|sigh|laughter|cough|noise)\]\s*$/;
+function injectBreath(text) {
+  if (!text) return "";
+  const parts = [];
+  const re = /[^。！？!?]+[。！？!?]?/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m[0].trim()) parts.push(m[0]);
+  }
+  if (parts.length < 3) return text;
+  const out = [];
+  for (let i = 0; i < parts.length; i++) {
+    const seg = parts[i] ?? "";
+    out.push(seg);
+    if (i === parts.length - 1) continue;
+    if (BREATH_MARK_RE.test(seg)) continue;
+    out.push("[breath]");
+  }
+  return out.join("");
+}
+
+// src/llm-channel.ts
+function renderPrompt(template, text) {
+  return template.includes("{text}") ? template.replace("{text}", text) : `${template}
+
+${text}`;
+}
+function fromYesimbot(ctx, opts = {}) {
+  const modelService = ctx?.yesimbot?.model;
+  if (!modelService) return null;
+  return {
+    source: "yesimbot",
+    async rewrite(text, promptTemplate, timeoutMs) {
+      const wanted = opts.modelId?.trim() || modelService.getDefaultChatModelId?.();
+      if (!wanted) throw new Error("yesimbot: no default chat model");
+      const ref = modelService.resolveChatModel(wanted);
+      if (!ref?.model) throw new Error(`yesimbot: cannot resolve model ${wanted}`);
+      const mod = await import("ai").catch(() => null);
+      if (!mod?.generateText) throw new Error("'ai' package unavailable");
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
+      try {
+        const result = await mod.generateText({
+          model: ref.model,
+          prompt: renderPrompt(promptTemplate, text),
+          abortSignal: controller.signal
+        });
+        return String(result?.text ?? "").trim();
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  };
+}
+function fromCustom(cfg, fetchLike = globalThis.fetch.bind(globalThis)) {
+  return {
+    source: "custom",
+    async rewrite(text, promptTemplate, timeoutMs) {
+      if (!cfg.apiBase) throw new Error("custom: apiBase empty");
+      if (!cfg.model) throw new Error("custom: model empty");
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
+      try {
+        const resp = await fetchLike(`${cfg.apiBase.replace(/\/+$/, "")}/v1/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}
+          },
+          body: JSON.stringify({
+            model: cfg.model,
+            messages: [{ role: "user", content: renderPrompt(promptTemplate, text) }],
+            temperature: 0.7
+          }),
+          signal: controller.signal
+        });
+        if (!resp.ok) {
+          const detail = await resp.text().catch(() => "");
+          throw new Error(`custom LLM HTTP ${resp.status}: ${detail.slice(0, 120)}`);
+        }
+        const data = await resp.json();
+        const raw = data?.choices?.[0]?.message?.content ?? "";
+        return String(raw).trim();
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  };
+}
+
 // src/index.ts
+var DEFAULT_LLM_PROMPT = `\u4F60\u662F\u4E13\u4E1A\u7684\u58F0\u97F3\u5BFC\u6F14\u3002\u628A\u4E0B\u9762\u7684\u5BF9\u8BDD\u56DE\u590D\u6539\u5199\u6210"\u6717\u8BFB\u53CB\u597D\u6587\u672C"\uFF0C\u4EA4\u7ED9 CosyVoice \u5408\u6210\u8BED\u97F3\u3002
+\u8981\u6C42\uFF1A
+1. \u4FDD\u7559\u539F\u610F\u4E0E\u4FE1\u606F\uFF0C\u4E0D\u5F97\u589E\u5220\u4E8B\u5B9E\u3001\u4E0D\u5F97\u6539\u4EBA\u79F0/\u6570\u5B57/\u4E13\u6709\u540D\u8BCD
+2. \u52A0\u5165\u81EA\u7136\u7684\u53E3\u8BED\u8282\u594F\uFF1A\u9002\u5F53\u65AD\u53E5\u3001\u505C\u987F\u63D0\u793A\u3001\u8BED\u6C14\u8BCD\uFF08\u55EF\u3001\u554A\u3001\u54C8\uFF09\uFF0C\u589E\u5F3A\u60C5\u7EEA\u8868\u8FBE
+3. \u6587\u672C\u4E2D\u53EF\u7528\u4EE5\u4E0B\u6807\u8BB0\u63A7\u5236\u97F5\u5F8B\uFF1A[breath] \u6362\u6C14 [laughter] \u7B11\u58F0 [sigh] \u53F9\u6C14\uFF08\u9002\u91CF\u4F7F\u7528\uFF0C\u6BCF\u53E5\u6700\u591A 1 \u4E2A\uFF09
+4. \u6807\u70B9\u89C4\u8303\u5316\uFF1A\u53E5\u672B\u5FC5\u987B\u6709\u53E5\u53F7/\u95EE\u53F7/\u611F\u53F9\u53F7\uFF1B\u9017\u53F7\u8868\u793A\u77ED\u505C\u987F\uFF0C\u53E5\u53F7\u8868\u793A\u957F\u505C\u987F
+5. \u82F1\u6587\u5355\u8BCD\u4FDD\u6301\u539F\u6837\uFF0C\u524D\u540E\u52A0\u7A7A\u683C\uFF1B\u6570\u5B57\u6309\u81EA\u7136\u8BFB\u6CD5\u6539\u5199\uFF08\u5982 3.5 \u2192 \u4E09\u70B9\u4E94\uFF09
+6. \u53EA\u8F93\u51FA\u6539\u5199\u540E\u7684\u6587\u672C\u672C\u8EAB\uFF0C\u4E0D\u8981\u89E3\u91CA\u3001\u4E0D\u8981\u5F15\u53F7\u3001\u4E0D\u8981 markdown
+7. \u8F93\u51FA\u957F\u5EA6\u4E0E\u539F\u6587\u672C\u76F8\u5F53\uFF08\xB130%\uFF09\uFF0C\u4E0D\u5F97\u6269\u5199
+
+\u539F\u6587\uFF1A
+{text}`;
 var name = "aka-yesimbot-voice";
 var inject = ["yesimbot"];
 var Config = import_koishi2.Schema.object({
@@ -221,7 +410,20 @@ var Config = import_koishi2.Schema.object({
   onMentionOnly: import_koishi2.Schema.boolean().default(false).description("\u4EC5\u88AB @ \u65F6\u914D\u8BED\u97F3"),
   logFailures: import_koishi2.Schema.boolean().default(true).description("\u5408\u6210/\u53D1\u9001\u5931\u8D25\u5199\u544A\u8B66\u65E5\u5FD7\uFF08\u4E0D\u5F71\u54CD\u6587\u672C\u56DE\u590D\uFF09"),
   napcatHttpUrl: import_koishi2.Schema.string().default("").description("NapCat HTTP API \u5730\u5740\uFF0C\u5982 http://mita_napcat:6199\uFF1BQQ \u8BED\u97F3\u76F4\u53D1\u8D70\u6B64\u901A\u9053\uFF0C\u7559\u7A7A\u56DE\u9000 Koishi \u5143\u7D20\u53D1\u9001\uFF08\u672C\u5730\u5F00\u53D1\uFF09"),
-  replaceText: import_koishi2.Schema.boolean().default(false).description("\u547D\u4E2D\u8BED\u97F3\u65F6\u541E\u6389 yesimbot \u6587\u672C\u56DE\u590D\uFF0C\u53EA\u53D1\u8BED\u97F3\uFF08TTS \u5931\u8D25\u81EA\u52A8\u8865\u53D1\u6587\u672C\uFF09")
+  replaceText: import_koishi2.Schema.boolean().default(false).description("\u547D\u4E2D\u8BED\u97F3\u65F6\u541E\u6389 yesimbot \u6587\u672C\u56DE\u590D\uFF0C\u53EA\u53D1\u8BED\u97F3\uFF08TTS \u5931\u8D25\u81EA\u52A8\u8865\u53D1\u6587\u672C\uFF09"),
+  llm: import_koishi2.Schema.object({
+    enabled: import_koishi2.Schema.boolean().default(false).description("LLM \u8BED\u97F3\u6548\u679C\u6E32\u67D3\uFF08\u9ED8\u8BA4\u5173\uFF0C\u5F00\u542F\u4F1A\u4EA7\u751F\u6A21\u578B\u8C03\u7528\uFF09"),
+    source: import_koishi2.Schema.union(["yesimbot", "custom"]).default("yesimbot").description("LLM \u901A\u9053\uFF1Ayesimbot \u4E3B\u6A21\u578B / \u72EC\u7ACB\u914D\u7F6E"),
+    model: import_koishi2.Schema.string().default("").description("yesimbot \u6A21\u578B fullId\uFF08\u5982 deepseek:deepseek-v4-flash\uFF09\uFF1B\u7A7A = yesimbot \u9ED8\u8BA4\u4E3B\u6A21\u578B"),
+    apiBase: import_koishi2.Schema.string().default("").description("\u72EC\u7ACB\u901A\u9053 baseURL\uFF08source=custom \u751F\u6548\uFF09"),
+    apiKey: import_koishi2.Schema.string().role("secret").default("").description("\u72EC\u7ACB\u901A\u9053 API Key\uFF08source=custom \u751F\u6548\uFF1B\u4E0D\u5199\u65E5\u5FD7\uFF09"),
+    customModel: import_koishi2.Schema.string().default("").description("\u72EC\u7ACB\u901A\u9053\u6A21\u578B\u540D\uFF08source=custom \u751F\u6548\uFF09"),
+    timeoutMs: import_koishi2.Schema.number().min(1e3).max(12e4).default(6e4).description("LLM \u8C03\u7528\u8D85\u65F6 ms\uFF0C\u8D85\u65F6\u964D\u7EA7\u539F\u6587"),
+    prompt: import_koishi2.Schema.string().role("textarea").default(DEFAULT_LLM_PROMPT).description("\u6539\u5199\u6307\u4EE4\u6A21\u677F\uFF08{text} \u5360\u4F4D\uFF09"),
+    fidelityRatio: import_koishi2.Schema.number().min(0).max(1).step(0.01).default(0.95).description("\u5185\u5BB9\u4FDD\u771F\u9608\u503C 0-1\uFF0C\u4F4E\u4E8E\u5219\u56DE\u9000\u89C4\u5219\u5C42\u7ED3\u679C"),
+    injectBreath: import_koishi2.Schema.boolean().default(true).description("LLM \u4E4B\u540E\u6309\u89C4\u5219\u6CE8\u5165 [breath] \u6362\u6C14"),
+    logPrompts: import_koishi2.Schema.boolean().default(false).description("\u8C03\u8BD5\uFF1A\u65E5\u5FD7\u8F93\u51FA\u6539\u5199\u524D\u540E\u6587\u672C\uFF08\u4E0D\u542B key\uFF09")
+  }).description("LLM \u8BED\u97F3\u6548\u679C\u6E32\u67D3")
 });
 function apply(ctx, config) {
   const logger = ctx.logger("aka-yesimbot-voice");
@@ -231,6 +433,32 @@ function apply(ctx, config) {
     voicePromptPath: config.voicePromptPath,
     instructText: config.instructText
   });
+  const llmCfg = config.llm;
+  let llmChannel = null;
+  if (llmCfg.enabled) {
+    if (llmCfg.source === "yesimbot") {
+      llmChannel = fromYesimbot(ctx, { modelId: llmCfg.model, logger });
+      if (!llmChannel) logger.warn("llm channel yesimbot unavailable \u2014 falling back to rules");
+    } else if (llmCfg.source === "custom") {
+      if (llmCfg.apiBase && llmCfg.customModel) {
+        llmChannel = fromCustom({ apiBase: llmCfg.apiBase, apiKey: llmCfg.apiKey, model: llmCfg.customModel });
+      } else {
+        logger.warn("llm channel custom missing apiBase/customModel \u2014 falling back to rules");
+      }
+    }
+  }
+  const renderOpts = {
+    llm: llmChannel,
+    fidelityRatio: llmCfg.fidelityRatio,
+    injectBreath: llmCfg.injectBreath,
+    timeoutMs: llmCfg.timeoutMs,
+    prompt: llmCfg.prompt || DEFAULT_LLM_PROMPT,
+    logPrompts: llmCfg.logPrompts,
+    logger
+  };
+  async function renderVoice(text) {
+    return render(text, renderOpts);
+  }
   const policyCfg = {
     ttsEnabled: config.ttsEnabled,
     probability: config.probability,
@@ -252,10 +480,21 @@ function apply(ctx, config) {
     const text = item.text;
     void (async () => {
       try {
-        const out = await tts.synthesize(text, config.outputDir, `voice-${Date.now()}.wav`);
+        const rendered = await renderVoice(text);
+        const out = await tts.synthesize(rendered.text, config.outputDir, `voice-${Date.now()}.wav`);
         await sendVoice(bot, channelId, out.wavPath, platform, config.napcatHttpUrl);
         lastSpeakAt.set(channelId, Date.now());
-        logger.info("voice sent (text replaced) channel=%s len=%d dur=%dms text=%s", channelId, out.pcmBytes, out.durationMs, text.slice(0, 30));
+        logger.info(
+          "voice sent (text replaced) channel=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s rendered=%s",
+          channelId,
+          out.pcmBytes,
+          out.durationMs,
+          rendered.source,
+          rendered.ratio.toFixed(3),
+          rendered.degraded,
+          rendered.reason ? ` reason=${rendered.reason}` : "",
+          rendered.text.slice(0, 40)
+        );
       } catch (err) {
         logger.warn("voice failed, fallback text channel=%s: %s", channelId, err instanceof Error ? err.message : String(err));
         try {
@@ -394,10 +633,21 @@ function apply(ctx, config) {
         }
         void (async () => {
           try {
-            const out = await tts.synthesize(text, config.outputDir, `voice-${Date.now()}.wav`);
+            const rendered = await renderVoice(text);
+            const out = await tts.synthesize(rendered.text, config.outputDir, `voice-${Date.now()}.wav`);
             await sendVoice(bot, channelId, out.wavPath, platform, config.napcatHttpUrl);
             lastSpeakAt.set(channelId, Date.now());
-            logger.info("voice sent channel=%s len=%d dur=%dms wav=%s", channelId, out.pcmBytes, out.durationMs, out.wavPath);
+            logger.info(
+              "voice sent channel=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s wav=%s",
+              channelId,
+              out.pcmBytes,
+              out.durationMs,
+              rendered.source,
+              rendered.ratio.toFixed(3),
+              rendered.degraded,
+              rendered.reason ? ` reason=${rendered.reason}` : "",
+              out.wavPath
+            );
           } catch (err) {
             if (config.logFailures) {
               logger.warn("voice failed channel=%s: %s", channelId, err instanceof Error ? err.message : String(err));
@@ -408,7 +658,13 @@ function apply(ctx, config) {
     };
     return plugin;
   });
-  logger.info("aka-yesimbot-voice registered (platforms=%s, replaceText=%s)", config.platforms.join(","), config.replaceText);
+  logger.info(
+    "aka-yesimbot-voice registered (platforms=%s, replaceText=%s, llm=%s%s)",
+    config.platforms.join(","),
+    config.replaceText,
+    llmCfg.enabled ? llmChannel ? llmChannel.source : "rules-fallback" : "off",
+    llmCfg.enabled && llmChannel ? `, breath=${llmCfg.injectBreath}` : ""
+  );
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {

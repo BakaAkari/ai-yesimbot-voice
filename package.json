@@ -19,7 +19,13 @@
     "./package.json": "./package.json"
   },
   "peerDependencies": {
-    "koishi": "^4.18.0"
+    "koishi": "^4.18.0",
+    "ai": ">=5"
+  },
+  "peerDependenciesMeta": {
+    "ai": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
@@ -32,7 +38,7 @@
     "vitest": "^3.2.7"
   },
   "scripts": {
-    "build": "tsup src/index.ts --format esm,cjs --dts --sourcemap",
+    "build": "tsup src/index.ts --format esm,cjs --dts --sourcemap --external ai",
     "clean": "rimraf dist",
     "prepublishOnly": "pnpm run clean && pnpm run build",
     "typecheck": "tsc --project tsconfig.json --noEmit",
