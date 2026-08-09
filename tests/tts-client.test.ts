@@ -7,7 +7,6 @@ const TMP = '/tmp/aka-yesimbot-voice-test'
 const cfg = {
   apiBase: 'http://tts.test:50000',
   timeoutMs: 5000,
-  voicePromptPath: '/tmp/aka-yesimbot-voice-test/prompt.wav',
   instructText: '请自然朗读。<|endofprompt|>',
 }
 
@@ -42,7 +41,7 @@ describe('TtsClient.synthesize', () => {
   test('posts multipart and writes wav file', async () => {
     const pcm = Buffer.alloc(4800, 0x00)
     const fetchLike = mockFetch({ body: pcm })
-    const client = new TtsClient({ ...cfg, voicePromptPath: '' }, fetchLike as never)
+    const client = new TtsClient(cfg, fetchLike as never)
 
     const result = await client.synthesize('你好', TMP, 'out.wav')
 
@@ -57,25 +56,35 @@ describe('TtsClient.synthesize', () => {
     expect(wav.length).toBe(4800 + 44)
   })
 
-  test('includes prompt_wav when voicePromptPath set', async () => {
+  test('includes prompt_wav when voicePromptPath passed to synthesize', async () => {
     const fs = await import('node:fs')
     fs.mkdirSync(TMP, { recursive: true })
-    fs.writeFileSync(cfg.voicePromptPath, Buffer.alloc(100, 0x11))
+    const promptPath = `${TMP}/prompt.wav`
+    fs.writeFileSync(promptPath, Buffer.alloc(100, 0x11))
     const fetchLike = mockFetch({ body: Buffer.alloc(44) })
     const client = new TtsClient(cfg, fetchLike as never)
 
-    await client.synthesize('测试', TMP, 'p.wav')
+    await client.synthesize('测试', TMP, 'p.wav', promptPath)
 
-    const [url, init] = fetchLike.mock.calls[0] as [string, { body: Uint8Array }]
+    const [, init] = fetchLike.mock.calls[0] as [string, { body: Uint8Array }]
     const body = Buffer.from(init.body)
     const bodyText = body.toString('latin1')
     expect(bodyText).toContain('prompt.wav')
     expect(bodyText).toContain('audio/wav')
   })
 
+  test('omits prompt_wav when no voicePromptPath', async () => {
+    const fetchLike = mockFetch({ body: Buffer.alloc(44) })
+    const client = new TtsClient(cfg, fetchLike as never)
+    await client.synthesize('测试', TMP, 'p.wav')
+    const [, init] = fetchLike.mock.calls[0] as [string, { body: Uint8Array }]
+    const bodyText = Buffer.from(init.body).toString('latin1')
+    expect(bodyText).not.toContain('prompt.wav')
+  })
+
   test('auto-appends <|endofprompt|> when instruct lacks it', async () => {
     const fetchLike = mockFetch({ body: Buffer.alloc(44) })
-    const client = new TtsClient({ ...cfg, voicePromptPath: '', instructText: '自然朗读' }, fetchLike as never)
+    const client = new TtsClient({ ...cfg, instructText: '自然朗读' }, fetchLike as never)
     await client.synthesize('测试', TMP, 'p.wav')
     const [, init] = fetchLike.mock.calls[0] as [string, { body: Uint8Array }]
     const bodyText = Buffer.from(init.body).toString('latin1')
@@ -84,7 +93,7 @@ describe('TtsClient.synthesize', () => {
 
   test('keeps existing <|endofprompt|> in instruct', async () => {
     const fetchLike = mockFetch({ body: Buffer.alloc(44) })
-    const client = new TtsClient({ ...cfg, voicePromptPath: '', instructText: '自然朗读。<|endofprompt|>' }, fetchLike as never)
+    const client = new TtsClient({ ...cfg, instructText: '自然朗读。<|endofprompt|>' }, fetchLike as never)
     await client.synthesize('测试', TMP, 'p.wav')
     const [, init] = fetchLike.mock.calls[0] as [string, { body: Uint8Array }]
     const bodyText = Buffer.from(init.body).toString('latin1')
@@ -93,13 +102,13 @@ describe('TtsClient.synthesize', () => {
 
   test('throws on http error', async () => {
     const fetchLike = mockFetch({ ok: false, status: 502, text: 'bad gateway' })
-    const client = new TtsClient({ ...cfg, voicePromptPath: '' }, fetchLike as never)
+    const client = new TtsClient(cfg, fetchLike as never)
     await expect(client.synthesize('hi', TMP, 'x.wav')).rejects.toThrow(/502/)
   })
 
   test('throws on empty audio', async () => {
     const fetchLike = mockFetch({ body: Buffer.alloc(0) })
-    const client = new TtsClient({ ...cfg, voicePromptPath: '' }, fetchLike as never)
+    const client = new TtsClient(cfg, fetchLike as never)
     await expect(client.synthesize('hi', TMP, 'x.wav')).rejects.toThrow(/empty audio/)
   })
 })

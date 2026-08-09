@@ -3,52 +3,41 @@ import { Schema, Context } from 'koishi';
 declare const name = "aka-yesimbot-voice";
 /** 依赖 yesimbot service（必选：Koishi 保证在 yesimbot 注册后加载本插件） */
 declare const inject: string[];
+/**
+ * 极简配置模型（v0.3.0 重构，无旧字段兼容负担）。
+ * - 基础：音色、触发概率、LLM 渲染开关、音色源目录
+ * - advanced：不常改的默认值折叠隐藏
+ */
 interface Config {
-    /** 总开关 */
-    ttsEnabled: boolean;
-    /** 生效平台（onebot / lark） */
-    platforms: string[];
-    /** TTS 服务地址 */
-    ttsApiBase: string;
-    /** 音色 prompt_wav 本地路径（空 = 服务端默认音色） */
-    voicePromptPath: string;
-    /** instruct_text 朗读指令 */
-    instructText: string;
-    /** 合成超时 ms */
-    ttsTimeoutMs: number;
-    /** 输出目录 */
-    outputDir: string;
-    /** 每条回复配语音概率 */
+    /** 音色名；'auto' = 音色目录按字母序第一个 */
+    voice: string;
+    /** 每条回复配语音概率 0-1 */
     probability: number;
-    /** 最短文本长度 */
-    minLength: number;
-    /** 最长文本长度 */
-    maxLength: number;
-    /** 同渠道冷却秒 */
-    cooldownSeconds: number;
-    /** 仅群聊 */
-    groupOnly: boolean;
-    /** 仅被 @ 时 */
-    onMentionOnly: boolean;
-    /** 发送失败时是否告警日志（不打扰用户） */
-    logFailures: boolean;
-    /** NapCat HTTP API 地址（QQ 语音直发；空 = 回退 Koishi 元素发送） */
-    napcatHttpUrl: string;
-    /** 发语音时吞掉 yesimbot 文本（只发语音，不发文本） */
-    replaceText: boolean;
-    /** LLM 语音效果渲染 */
-    llm: {
-        enabled: boolean;
-        source: 'yesimbot' | 'custom';
-        model: string;
-        apiBase: string;
-        apiKey: string;
-        customModel: string;
-        timeoutMs: number;
-        prompt: string;
-        fidelityRatio: number;
-        injectBreath: boolean;
-        logPrompts: boolean;
+    /** LLM 语音效果渲染（走 yesimbot 主模型通道；失败自动降级规则层） */
+    llm: boolean;
+    /** 音色源目录：管理员放/删 *.wav 即增删音色（重启生效） */
+    voiceDir: string;
+    advanced: {
+        /** CosyVoice3 服务地址 */
+        ttsApiBase: string;
+        /** 朗读指令（中英混排） */
+        instructText: string;
+        /** 合成超时 ms */
+        ttsTimeoutMs: number;
+        /** 最短触发文本长度（字符） */
+        minLength: number;
+        /** 最长触发文本长度（字符），超过不配（避免长文朗读） */
+        maxLength: number;
+        /** 同渠道冷却秒 */
+        cooldownSeconds: number;
+        /** 仅群聊配语音 */
+        groupOnly: boolean;
+        /** 仅被 @ 时配语音 */
+        onMentionOnly: boolean;
+        /** 命中时吞掉 yesimbot 文本只发语音（TTS 失败自动补发文本） */
+        replaceText: boolean;
+        /** NapCat HTTP API（QQ 语音直发） */
+        napcatHttpUrl: string;
     };
 }
 declare const Config: Schema<Config>;

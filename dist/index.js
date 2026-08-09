@@ -37,6 +37,7 @@ __export(index_exports, {
 });
 module.exports = __toCommonJS(index_exports);
 var import_koishi2 = require("koishi");
+var import_node_path2 = require("path");
 
 // src/tts-client.ts
 var WAV_HEADER_SIZE = 44;
@@ -45,9 +46,9 @@ var TtsClient = class {
     this.config = config;
     this.fetchLike = fetchLike;
   }
-  async synthesize(text, outDir, outName = "voice.wav") {
+  async synthesize(text, outDir, outName = "voice.wav", voicePromptPath) {
     const startedAt = Date.now();
-    const { apiBase, timeoutMs, voicePromptPath, instructText } = this.config;
+    const { apiBase, timeoutMs, instructText } = this.config;
     const boundary = `----akaTts${Date.now()}${Math.random().toString(16).slice(2)}`;
     const chunks = [];
     const safeInstruct = instructText.includes("<|endofprompt|>") ? instructText : `${instructText.trim()}<|endofprompt|>`;
@@ -93,9 +94,9 @@ Content-Type: audio/wav\r
     const pcm = Buffer.from(await response.arrayBuffer());
     if (pcm.length < WAV_HEADER_SIZE) throw new Error(`TTS empty audio (${pcm.length} bytes)`);
     const { mkdir } = await import("fs/promises");
-    const { join } = await import("path");
+    const { join: join3 } = await import("path");
     await mkdir(outDir, { recursive: true });
-    const wavPath = join(outDir, outName);
+    const wavPath = join3(outDir, outName);
     const fs = await import("fs");
     await fs.promises.writeFile(wavPath, wrapWav(pcm));
     return { wavPath, durationMs: Date.now() - startedAt, pcmBytes: pcm.length };
@@ -343,41 +344,52 @@ function fromYesimbot(ctx, opts = {}) {
     }
   };
 }
-function fromCustom(cfg, fetchLike = globalThis.fetch.bind(globalThis)) {
-  return {
-    source: "custom",
-    async rewrite(text, promptTemplate, timeoutMs) {
-      if (!cfg.apiBase) throw new Error("custom: apiBase empty");
-      if (!cfg.model) throw new Error("custom: model empty");
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
-      try {
-        const resp = await fetchLike(`${cfg.apiBase.replace(/\/+$/, "")}/v1/chat/completions`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}
-          },
-          body: JSON.stringify({
-            model: cfg.model,
-            messages: [{ role: "user", content: renderPrompt(promptTemplate, text) }],
-            temperature: 0.7
-          }),
-          signal: controller.signal
-        });
-        if (!resp.ok) {
-          const detail = await resp.text().catch(() => "");
-          throw new Error(`custom LLM HTTP ${resp.status}: ${detail.slice(0, 120)}`);
-        }
-        const data = await resp.json();
-        const raw = data?.choices?.[0]?.message?.content ?? "";
-        return String(raw).trim();
-      } finally {
-        clearTimeout(timer);
-      }
+
+// src/voices.ts
+var import_node_fs = require("fs");
+var import_node_path = require("path");
+var VoiceLibrary = class {
+  constructor(dir) {
+    this.dir = dir;
+  }
+  /** 扫描并返回全部可用音色（已按名字排序）；目录不存在/不可读返回空数组 */
+  scan() {
+    let entries;
+    try {
+      entries = (0, import_node_fs.readdirSync)(this.dir);
+    } catch {
+      return [];
     }
-  };
-}
+    const voices = [];
+    for (const entry of entries) {
+      if (!entry.toLowerCase().endsWith(".wav")) continue;
+      const path = (0, import_node_path.join)(this.dir, entry);
+      try {
+        if ((0, import_node_fs.statSync)(path).size < 1024) continue;
+      } catch {
+        continue;
+      }
+      voices.push({ name: entry.slice(0, -4), path });
+    }
+    voices.sort((a, b) => a.name.localeCompare(b.name));
+    return voices;
+  }
+  /**
+   * 按配置解析当前音色：
+   * - 'auto' → 扫描结果第一个（无则 null）
+   * - 具名 → 匹配该音色；不存在 → 回退第一个
+   * 始终基于最新扫描结果；目录无音色返回 null。
+   */
+  resolve(voice) {
+    const voices = this.scan();
+    if (!voices.length) return null;
+    if (voice && voice !== "auto") {
+      const found = voices.find((v) => v.name === voice);
+      if (found) return found;
+    }
+    return voices[0] ?? null;
+  }
+};
 
 // src/index.ts
 var DEFAULT_LLM_PROMPT = `\u4F60\u662F\u4E13\u4E1A\u7684\u58F0\u97F3\u5BFC\u6F14\u3002\u628A\u4E0B\u9762\u7684\u5BF9\u8BDD\u56DE\u590D\u6539\u5199\u6210"\u6717\u8BFB\u53CB\u597D\u6587\u672C"\uFF0C\u4EA4\u7ED9 CosyVoice \u5408\u6210\u8BED\u97F3\u3002
@@ -395,82 +407,86 @@ var DEFAULT_LLM_PROMPT = `\u4F60\u662F\u4E13\u4E1A\u7684\u58F0\u97F3\u5BFC\u6F14
 var name = "aka-yesimbot-voice";
 var inject = ["yesimbot"];
 var Config = import_koishi2.Schema.object({
-  ttsEnabled: import_koishi2.Schema.boolean().default(true).description("\u603B\u5F00\u5173\uFF1A\u5F00\u542F\u540E bot \u56DE\u590D\u6309\u7B56\u7565\u9644\u5E26\u8BED\u97F3"),
-  platforms: import_koishi2.Schema.array(String).default(["onebot"]).description("\u751F\u6548\u5E73\u53F0\uFF1Aonebot\uFF08QQ\uFF09/ lark\uFF08\u98DE\u4E66\uFF09"),
-  ttsApiBase: import_koishi2.Schema.string().default("http://127.0.0.1:50000").description("CosyVoice3 \u670D\u52A1\u5730\u5740"),
-  voicePromptPath: import_koishi2.Schema.string().default("").description("\u97F3\u8272 prompt_wav \u672C\u5730\u8DEF\u5F84\uFF1B\u7559\u7A7A\u4F7F\u7528\u670D\u52A1\u7AEF\u9ED8\u8BA4\u97F3\u8272"),
-  instructText: import_koishi2.Schema.string().default("\u8BF7\u7528\u81EA\u7136\u6D41\u7545\u7684\u4E2D\u82F1\u53CC\u8BED\u6717\u8BFB\uFF0C\u82F1\u6587\u5355\u8BCD\u4F7F\u7528\u6807\u51C6\u82F1\u8BED\u53D1\u97F3\uFF0C\u6CE8\u610F\u65AD\u53E5\u548C\u505C\u987F\uFF0C\u8BED\u901F\u9002\u4E2D\u3002<|endofprompt|>").description("\u6717\u8BFB\u6307\u4EE4"),
-  ttsTimeoutMs: import_koishi2.Schema.number().min(1e3).max(12e4).default(3e4).description("\u5408\u6210\u8D85\u65F6 ms"),
-  outputDir: import_koishi2.Schema.string().default("data/aka-yesimbot-voice").description("\u5408\u6210\u97F3\u9891\u8F93\u51FA\u76EE\u5F55"),
-  probability: import_koishi2.Schema.number().min(0).max(1).default(0.2).description("\u6BCF\u6761\u56DE\u590D\u914D\u8BED\u97F3\u6982\u7387"),
-  minLength: import_koishi2.Schema.number().min(0).default(8).description("\u6700\u77ED\u6587\u672C\u957F\u5EA6\uFF08\u5B57\u7B26\uFF09\u624D\u914D\u8BED\u97F3"),
-  maxLength: import_koishi2.Schema.number().min(0).default(120).description("\u8D85\u8FC7\u6B64\u957F\u5EA6\u4E0D\u914D\u8BED\u97F3"),
-  cooldownSeconds: import_koishi2.Schema.number().min(0).default(120).description("\u540C\u6E20\u9053\u51B7\u5374\u79D2\u6570"),
-  groupOnly: import_koishi2.Schema.boolean().default(true).description("\u4EC5\u7FA4\u804A\u914D\u8BED\u97F3"),
-  onMentionOnly: import_koishi2.Schema.boolean().default(false).description("\u4EC5\u88AB @ \u65F6\u914D\u8BED\u97F3"),
-  logFailures: import_koishi2.Schema.boolean().default(true).description("\u5408\u6210/\u53D1\u9001\u5931\u8D25\u5199\u544A\u8B66\u65E5\u5FD7\uFF08\u4E0D\u5F71\u54CD\u6587\u672C\u56DE\u590D\uFF09"),
-  napcatHttpUrl: import_koishi2.Schema.string().default("").description("NapCat HTTP API \u5730\u5740\uFF0C\u5982 http://mita_napcat:6199\uFF1BQQ \u8BED\u97F3\u76F4\u53D1\u8D70\u6B64\u901A\u9053\uFF0C\u7559\u7A7A\u56DE\u9000 Koishi \u5143\u7D20\u53D1\u9001\uFF08\u672C\u5730\u5F00\u53D1\uFF09"),
-  replaceText: import_koishi2.Schema.boolean().default(false).description("\u547D\u4E2D\u8BED\u97F3\u65F6\u541E\u6389 yesimbot \u6587\u672C\u56DE\u590D\uFF0C\u53EA\u53D1\u8BED\u97F3\uFF08TTS \u5931\u8D25\u81EA\u52A8\u8865\u53D1\u6587\u672C\uFF09"),
-  llm: import_koishi2.Schema.object({
-    enabled: import_koishi2.Schema.boolean().default(true).description("LLM \u8BED\u97F3\u6548\u679C\u6E32\u67D3\uFF08\u9ED8\u8BA4\u5F00\uFF0C\u8D70 yesimbot \u4E3B\u6A21\u578B\u901A\u9053\uFF09"),
-    source: import_koishi2.Schema.union(["yesimbot", "custom"]).default("yesimbot").description("LLM \u901A\u9053\uFF1Ayesimbot \u4E3B\u6A21\u578B / \u72EC\u7ACB\u914D\u7F6E"),
-    model: import_koishi2.Schema.string().default("").description("yesimbot \u6A21\u578B fullId\uFF08\u5982 deepseek:deepseek-v4-flash\uFF09\uFF1B\u7A7A = yesimbot \u9ED8\u8BA4\u4E3B\u6A21\u578B"),
-    apiBase: import_koishi2.Schema.string().default("").description("\u72EC\u7ACB\u901A\u9053 baseURL\uFF08source=custom \u751F\u6548\uFF09"),
-    apiKey: import_koishi2.Schema.string().role("secret").default("").description("\u72EC\u7ACB\u901A\u9053 API Key\uFF08source=custom \u751F\u6548\uFF1B\u4E0D\u5199\u65E5\u5FD7\uFF09"),
-    customModel: import_koishi2.Schema.string().default("").description("\u72EC\u7ACB\u901A\u9053\u6A21\u578B\u540D\uFF08source=custom \u751F\u6548\uFF09"),
-    timeoutMs: import_koishi2.Schema.number().min(1e3).max(12e4).default(6e4).description("LLM \u8C03\u7528\u8D85\u65F6 ms\uFF0C\u8D85\u65F6\u964D\u7EA7\u539F\u6587"),
-    prompt: import_koishi2.Schema.string().role("textarea").default(DEFAULT_LLM_PROMPT).description("\u6539\u5199\u6307\u4EE4\u6A21\u677F\uFF08{text} \u5360\u4F4D\uFF09"),
-    fidelityRatio: import_koishi2.Schema.number().min(0).max(1).step(0.01).default(0.95).description("\u5185\u5BB9\u4FDD\u771F\u9608\u503C 0-1\uFF0C\u4F4E\u4E8E\u5219\u56DE\u9000\u89C4\u5219\u5C42\u7ED3\u679C"),
-    injectBreath: import_koishi2.Schema.boolean().default(true).description("LLM \u4E4B\u540E\u6309\u89C4\u5219\u6CE8\u5165 [breath] \u6362\u6C14"),
-    logPrompts: import_koishi2.Schema.boolean().default(false).description("\u8C03\u8BD5\uFF1A\u65E5\u5FD7\u8F93\u51FA\u6539\u5199\u524D\u540E\u6587\u672C\uFF08\u4E0D\u542B key\uFF09")
-  }).description("LLM \u8BED\u97F3\u6548\u679C\u6E32\u67D3")
+  voice: import_koishi2.Schema.string().default("auto").description("\u5F53\u524D\u97F3\u8272\uFF1Aauto=\u97F3\u8272\u76EE\u5F55\u7B2C\u4E00\u4E2A\uFF0C\u6216\u76F4\u63A5\u586B\u97F3\u8272\u540D\uFF08\u5982 leijun / gs_Collei\uFF09"),
+  probability: import_koishi2.Schema.number().min(0).max(1).default(0.85).description("\u6BCF\u6761\u56DE\u590D\u914D\u8BED\u97F3\u6982\u7387"),
+  llm: import_koishi2.Schema.boolean().default(true).description("LLM \u8BED\u97F3\u6548\u679C\u6E32\u67D3\uFF08\u8D70 yesimbot \u4E3B\u6A21\u578B\uFF1B\u5931\u8D25\u81EA\u52A8\u964D\u7EA7\u89C4\u5219\u5C42\uFF09"),
+  voiceDir: import_koishi2.Schema.string().default("data/aka-yesimbot-voice/voices").description("\u97F3\u8272\u6E90\u76EE\u5F55\uFF1A\u5F80\u91CC\u653E/\u5220 *.wav \u5373\u589E\u5220\u97F3\u8272\uFF08\u91CD\u542F\u751F\u6548\uFF09"),
+  advanced: import_koishi2.Schema.object({
+    ttsApiBase: import_koishi2.Schema.string().default("http://100.121.167.1:50000").description("CosyVoice3 \u670D\u52A1\u5730\u5740"),
+    instructText: import_koishi2.Schema.string().default("\u8BF7\u7528\u81EA\u7136\u6D41\u7545\u7684\u4E2D\u82F1\u53CC\u8BED\u6717\u8BFB\uFF0C\u82F1\u6587\u5355\u8BCD\u4F7F\u7528\u6807\u51C6\u82F1\u8BED\u53D1\u97F3\uFF0C\u6CE8\u610F\u65AD\u53E5\u548C\u505C\u987F\uFF0C\u8BED\u901F\u9002\u4E2D\u3002<|endofprompt|>").description("\u6717\u8BFB\u6307\u4EE4"),
+    ttsTimeoutMs: import_koishi2.Schema.number().min(1e3).max(12e4).default(3e4).description("\u5408\u6210\u8D85\u65F6 ms"),
+    minLength: import_koishi2.Schema.number().min(0).default(4).description("\u6700\u77ED\u89E6\u53D1\u6587\u672C\u957F\u5EA6\uFF08\u5B57\u7B26\uFF09"),
+    maxLength: import_koishi2.Schema.number().min(0).default(120).description("\u6700\u957F\u89E6\u53D1\u6587\u672C\u957F\u5EA6\uFF08\u5B57\u7B26\uFF09"),
+    cooldownSeconds: import_koishi2.Schema.number().min(0).default(60).description("\u540C\u6E20\u9053\u51B7\u5374\u79D2"),
+    groupOnly: import_koishi2.Schema.boolean().default(true).description("\u4EC5\u7FA4\u804A\u914D\u8BED\u97F3"),
+    onMentionOnly: import_koishi2.Schema.boolean().default(false).description("\u4EC5\u88AB @ \u65F6\u914D\u8BED\u97F3"),
+    replaceText: import_koishi2.Schema.boolean().default(true).description("\u547D\u4E2D\u65F6\u541E\u6389 yesimbot \u6587\u672C\u53EA\u53D1\u8BED\u97F3\uFF08TTS \u5931\u8D25\u81EA\u52A8\u8865\u53D1\u6587\u672C\uFF09"),
+    napcatHttpUrl: import_koishi2.Schema.string().default("http://mita_napcat:6199").description("NapCat HTTP API\uFF08QQ \u8BED\u97F3\u76F4\u53D1\uFF09")
+  }).description("\u9AD8\u7EA7\u8BBE\u7F6E\uFF08\u4E00\u822C\u4E0D\u7528\u52A8\uFF09")
 });
 function apply(ctx, config) {
   const logger = ctx.logger("aka-yesimbot-voice");
+  const adv = config.advanced;
   const tts = new TtsClient({
-    apiBase: config.ttsApiBase,
-    timeoutMs: config.ttsTimeoutMs,
-    voicePromptPath: config.voicePromptPath,
-    instructText: config.instructText
+    apiBase: adv.ttsApiBase,
+    timeoutMs: adv.ttsTimeoutMs,
+    instructText: adv.instructText
   });
-  const llmCfg = config.llm;
-  let llmChannel = null;
-  if (llmCfg.enabled) {
-    if (llmCfg.source === "yesimbot") {
-      llmChannel = fromYesimbot(ctx, { modelId: llmCfg.model, logger });
-      if (!llmChannel) logger.warn("llm channel yesimbot unavailable \u2014 falling back to rules");
-    } else if (llmCfg.source === "custom") {
-      if (llmCfg.apiBase && llmCfg.customModel) {
-        llmChannel = fromCustom({ apiBase: llmCfg.apiBase, apiKey: llmCfg.apiKey, model: llmCfg.customModel });
-      } else {
-        logger.warn("llm channel custom missing apiBase/customModel \u2014 falling back to rules");
-      }
+  const absVoiceDir = resolveVoiceDir(ctx, config.voiceDir);
+  const outputDir = outputDirOf(absVoiceDir);
+  const voices = new VoiceLibrary(absVoiceDir);
+  const settingsPath = (0, import_node_path2.join)((0, import_node_path2.dirname)(absVoiceDir), "settings.json");
+  function loadSavedVoice() {
+    try {
+      const { readFileSync: readFileSync2 } = require("fs");
+      const data = JSON.parse(readFileSync2(settingsPath, "utf8"));
+      if (typeof data.voice === "string" && data.voice) return data.voice;
+    } catch {
     }
+    return config.voice;
+  }
+  function saveVoice(name2) {
+    try {
+      const { writeFileSync, mkdirSync } = require("fs");
+      mkdirSync((0, import_node_path2.dirname)(settingsPath), { recursive: true });
+      writeFileSync(settingsPath, JSON.stringify({ voice: name2 }, null, 2), "utf8");
+    } catch (err) {
+      logger.warn("save voice settings failed: %s", err instanceof Error ? err.message : String(err));
+    }
+  }
+  let currentVoice = loadSavedVoice();
+  let llmChannel = null;
+  if (config.llm) {
+    llmChannel = fromYesimbot(ctx, { logger });
+    if (!llmChannel) logger.warn("llm channel yesimbot unavailable \u2014 falling back to rules");
   }
   const renderOpts = {
     llm: llmChannel,
-    fidelityRatio: llmCfg.fidelityRatio,
-    injectBreath: llmCfg.injectBreath,
-    timeoutMs: llmCfg.timeoutMs,
-    prompt: llmCfg.prompt || DEFAULT_LLM_PROMPT,
-    logPrompts: llmCfg.logPrompts,
+    fidelityRatio: 0.95,
+    injectBreath: true,
+    timeoutMs: 6e4,
+    prompt: DEFAULT_LLM_PROMPT,
+    logPrompts: false,
     logger
   };
   async function renderVoice(text) {
     return render(text, renderOpts);
   }
   const policyCfg = {
-    ttsEnabled: config.ttsEnabled,
+    ttsEnabled: true,
     probability: config.probability,
-    minLength: config.minLength,
-    maxLength: config.maxLength,
-    cooldownSeconds: config.cooldownSeconds,
-    groupOnly: config.groupOnly,
-    onMentionOnly: config.onMentionOnly
+    minLength: adv.minLength,
+    maxLength: adv.maxLength,
+    cooldownSeconds: adv.cooldownSeconds,
+    groupOnly: adv.groupOnly,
+    onMentionOnly: adv.onMentionOnly
   };
   const lastSpeakAt = /* @__PURE__ */ new Map();
   const pendingVoice = /* @__PURE__ */ new Map();
   const turnSegments = /* @__PURE__ */ new Map();
+  function currentVoicePath() {
+    return voices.resolve(currentVoice)?.path;
+  }
   function consumePending(channelId, bot, platform) {
     const item = pendingVoice.get(channelId);
     if (!item || item.consumed) return;
@@ -481,8 +497,8 @@ function apply(ctx, config) {
     void (async () => {
       try {
         const rendered = await renderVoice(text);
-        const out = await tts.synthesize(rendered.text, config.outputDir, `voice-${Date.now()}.wav`);
-        await sendVoice(bot, channelId, out.wavPath, platform, config.napcatHttpUrl);
+        const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, currentVoicePath());
+        await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl);
         lastSpeakAt.set(channelId, Date.now());
         logger.info(
           "voice sent (text replaced) channel=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s rendered=%s",
@@ -501,9 +517,7 @@ function apply(ctx, config) {
           await bot.sendMessage(channelId, text);
           logger.info("fallback text sent channel=%s", channelId);
         } catch (fallbackErr) {
-          if (config.logFailures) {
-            logger.warn("fallback text also failed channel=%s: %s", channelId, fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr));
-          }
+          logger.warn("fallback text also failed channel=%s: %s", channelId, fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr));
         }
       }
     })();
@@ -546,6 +560,29 @@ function apply(ctx, config) {
     if (!text) return [];
     return text.split(/<message\s*\/?\s*>/).map((s) => s.replace(/<\/message>/g, "").trim()).filter(Boolean);
   }
+  ctx.command("voice", "\u8BED\u97F3\u8BBE\u7F6E\uFF1A\u67E5\u770B / \u5207\u6362\u5F53\u524D\u97F3\u8272").action(async ({ session }) => {
+    if (!session) return "\u9700\u8981\u4F1A\u8BDD\u4E0A\u4E0B\u6587\u3002";
+    const list = voices.scan();
+    const current = voices.resolve(currentVoice);
+    if (!list.length) return "\u97F3\u8272\u76EE\u5F55\u4E3A\u7A7A\uFF1A\u5F80 voiceDir \u653E\u5165 *.wav\uFF08\u91CD\u542F\u751F\u6548\uFF09\u3002";
+    const lines = list.map((v) => `${v.name === current?.name ? "\u25CF " : "\u25CB "}${v.name}`).join("\n");
+    return `\u5F53\u524D\u97F3\u8272\uFF1A${current?.name ?? "\uFF08\u65E0\uFF09"}
+\u53EF\u7528\u97F3\u8272\uFF1A
+${lines}
+
+\u7528 .voice <\u97F3\u8272\u540D> \u5207\u6362`;
+  });
+  ctx.command("voice <name>", "\u5207\u6362\u5230\u6307\u5B9A\u97F3\u8272").action(async ({ session }, name2) => {
+    if (!session) return "\u9700\u8981\u4F1A\u8BDD\u4E0A\u4E0B\u6587\u3002";
+    if (!name2) return "\u7528\u6CD5\uFF1A.voice <\u97F3\u8272\u540D>\uFF08\u5148 .voice \u67E5\u770B\u53EF\u7528\u5217\u8868\uFF09";
+    const list = voices.scan();
+    const found = list.find((v) => v.name === name2);
+    if (!found) return `\u6CA1\u6709\u97F3\u8272\u300C${name2}\u300D\u3002\u7528 .voice \u67E5\u770B\u53EF\u7528\u5217\u8868\u3002`;
+    currentVoice = name2;
+    saveVoice(name2);
+    logger.info("voice switched to %s by user", name2);
+    return `\u2705 \u5DF2\u5207\u6362\u5230\u97F3\u8272\u300C${name2}\u300D\uFF08\u5DF2\u4FDD\u5B58\uFF0C\u91CD\u542F\u4E0D\u4E22\uFF09\u3002`;
+  });
   const yesimbot = ctx.yesimbot;
   if (!yesimbot?.registerChannelPlugin) {
     logger.warn("yesimbot service unavailable \u2014 plugin inactive");
@@ -555,7 +592,7 @@ function apply(ctx, config) {
     const channelId = scope.channelId;
     const platform = scope.platform;
     const isShared = scope.type === "shared";
-    if (config.replaceText && config.platforms.includes(platform) && !bot._akaVoicePatched) {
+    if (adv.replaceText && platform === "onebot" && !bot._akaVoicePatched) {
       ;
       bot._akaVoicePatched = true;
       const origSend = bot.sendMessage.bind(bot);
@@ -593,7 +630,7 @@ function apply(ctx, config) {
       name: "aka-yesimbot-voice",
       // 记录本 turn 的 <message> 段，供 sendMessage patch 匹配（只吞 yesimbot 回复）
       async onAppend(entries) {
-        if (!config.replaceText) return;
+        if (!adv.replaceText) return;
         for (const entry of entries) {
           if (entry?.type !== "message") continue;
           const data = entry.data;
@@ -604,9 +641,9 @@ function apply(ctx, config) {
           }
         }
       },
-      // replaceText 模式：turn 结束立即消费；旧模式：文本照发语音附带
+      // replaceText 模式：turn 结束立即消费；否则在 turn 结束按策略附带语音
       async onTurnFinish(result) {
-        if (config.replaceText) {
+        if (adv.replaceText) {
           turnSegments.delete(channelId);
           const item = pendingVoice.get(channelId);
           if (item && !item.consumed) {
@@ -614,7 +651,6 @@ function apply(ctx, config) {
           }
           return;
         }
-        if (!config.platforms.includes(platform)) return;
         const text = extractReplyText(result.messages);
         if (!text) return;
         logger.info("voice candidate channel=%s shared=%s text=%s", channelId, isShared, text.slice(0, 40));
@@ -634,8 +670,8 @@ function apply(ctx, config) {
         void (async () => {
           try {
             const rendered = await renderVoice(text);
-            const out = await tts.synthesize(rendered.text, config.outputDir, `voice-${Date.now()}.wav`);
-            await sendVoice(bot, channelId, out.wavPath, platform, config.napcatHttpUrl);
+            const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, currentVoicePath());
+            await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl);
             lastSpeakAt.set(channelId, Date.now());
             logger.info(
               "voice sent channel=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s wav=%s",
@@ -649,22 +685,32 @@ function apply(ctx, config) {
               out.wavPath
             );
           } catch (err) {
-            if (config.logFailures) {
-              logger.warn("voice failed channel=%s: %s", channelId, err instanceof Error ? err.message : String(err));
-            }
+            logger.warn("voice failed channel=%s: %s", channelId, err instanceof Error ? err.message : String(err));
           }
         })();
       }
     };
     return plugin;
   });
+  const voiceName = (() => {
+    const v = voices.resolve(currentVoice);
+    return v ? v.name : "(none)";
+  })();
   logger.info(
-    "aka-yesimbot-voice registered (platforms=%s, replaceText=%s, llm=%s%s)",
-    config.platforms.join(","),
-    config.replaceText,
-    llmCfg.enabled ? llmChannel ? llmChannel.source : "rules-fallback" : "off",
-    llmCfg.enabled && llmChannel ? `, breath=${llmCfg.injectBreath}` : ""
+    "aka-yesimbot-voice registered (voice=%s, llm=%s, replaceText=%s, voiceDir=%s)",
+    voiceName,
+    config.llm ? llmChannel ? "yesimbot" : "rules-fallback" : "off",
+    adv.replaceText,
+    absVoiceDir
   );
+}
+function resolveVoiceDir(ctx, voiceDir) {
+  if ((0, import_node_path2.isAbsolute)(voiceDir)) return voiceDir;
+  const baseDir = ctx.baseDir ?? process.cwd();
+  return (0, import_node_path2.join)(baseDir, voiceDir);
+}
+function outputDirOf(voiceDir) {
+  return (0, import_node_path2.dirname)(voiceDir);
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {

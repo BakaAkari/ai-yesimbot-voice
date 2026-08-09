@@ -4,8 +4,6 @@ export interface TtsClientConfig {
   apiBase: string
   /** 请求超时 ms */
   timeoutMs: number
-  /** 音色 prompt_wav 的本地路径（文件内容随请求上传） */
-  voicePromptPath: string
   /** instruct_text：朗读指令（中英混排修复方案的核心） */
   instructText: string
 }
@@ -33,9 +31,9 @@ export class TtsClient {
     private readonly fetchLike: typeof fetch = globalThis.fetch.bind(globalThis),
   ) {}
 
-  async synthesize(text: string, outDir: string, outName = 'voice.wav'): Promise<TtsSynthesisResult> {
+  async synthesize(text: string, outDir: string, outName = 'voice.wav', voicePromptPath?: string): Promise<TtsSynthesisResult> {
     const startedAt = Date.now()
-    const { apiBase, timeoutMs, voicePromptPath, instructText } = this.config
+    const { apiBase, timeoutMs, instructText } = this.config
     const boundary = `----akaTts${Date.now()}${Math.random().toString(16).slice(2)}`
     const chunks: Buffer[] = []
 

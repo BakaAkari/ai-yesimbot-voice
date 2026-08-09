@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.3.0] - 2026-08-09
+
+### 重大重构：音色库 + 配置极简化（无旧配置兼容负担）
+
+**多音色库**
+- 新增 `VoiceLibrary`：扫描 `voiceDir`（默认 `data/aka-yesimbot-voice/voices`）里的 `*.wav` 作为可用音色
+- **管理员增删音色 = 往 voiceDir 放/删 wav 文件**（重启生效）；`<1KB` 空壳/损坏文件自动跳过
+- `.voice` 指令：管理员查看可用音色列表
+- `.voice <音色名>` 指令：切换当前音色，持久化到 `settings.json`（重启不丢）
+
+**配置极简化（17 平铺字段 → 4 基础 + 1 折叠组）**
+- 基础：`voice`(auto)、`probability`(0.85)、`llm`(true)、`voiceDir`
+- advanced 折叠隐藏：`ttsApiBase`/`instructText`/`ttsTimeoutMs`/`minLength`/`maxLength`/`cooldownSeconds`/`groupOnly`/`onMentionOnly`/`replaceText`/`napcatHttpUrl`
+- 删除 `platforms`/`outputDir`/`logFailures` 等硬编码进默认
+
+**音色动态切换**
+- `tts-client` 改为把音色路径在合成时传入（支持运行时切音色）
+- `voice`/settings 优先级：settings.json 覆盖 config.voice
+
+### 随带发布（此前 v0.2.0 prep 未单独发版）
+- LLM 语音效果渲染层：规则层 + yesimbot/custom LLM 通道 + 内容保真校验 + [breath] 注入
+- 断点优化：LLM 改写降级规则层、prosody 注入等
+
 ## [0.1.1] - 2026-08-07
 
 ### 修复
