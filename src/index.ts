@@ -13,7 +13,7 @@ const DEFAULT_LLM_PROMPT = `你是专业的声音导演。把下面的对话回�
 要求：
 1. 保留原意与信息，不得增删事实、不得改人称/数字/专有名词
 2. 加入自然的口语节奏：适当断句、停顿提示、语气词（嗯、啊、哈），增强情绪表达
-3. 文本中可用以下标记控制韵律：[breath] 换气 [laughter] 笑声 [sigh] 叹气（适量使用，每句最多 1 个）
+3. 不要插入任何方括号标记（如 [breath] 等会被丢弃）
 4. 标点规范化：句末必须有句号/问号/感叹号；逗号表示短停顿，句号表示长停顿
 5. 英文单词保持原样，前后加空格；数字按自然读法改写（如 3.5 → 三点五）
 6. 只输出改写后的文本本身，不要解释、不要引号、不要 markdown
@@ -162,7 +162,8 @@ export function apply(ctx: Context, config: Config) {
   const renderOpts: RenderOptions = {
     llm: llmChannel,
     fidelityRatio: 0.95,
-    injectBreath: true,
+    // zero_shot 下 [breath] 等韵律标记会导致模型提前截断→音频不完整，关闭注入（最终文本还会统一剥除标记）
+    injectBreath: false,
     timeoutMs: 60000,
     prompt: DEFAULT_LLM_PROMPT,
     logPrompts: false,
@@ -207,7 +208,17 @@ export function apply(ctx: Context, config: Config) {
 
   /** 解析当前音色（auto/具名，含参考音频路径 + 转写）；目录无音色返回 null */
   function currentVoice(): VoiceInfo | null {
-    return voices.resolve(resolveCurrentVoice())
+    const requested = resolveCurrentVoice()
+    const voice = voices.resolve(requested)
+    const resolved = voice?.name ?? null
+    // 具名音色请求却解析到别的音色（通常=排序第一即 halo_marine）→ 必是配置/扫描异常，显式告警，不再静默
+    if (requested && requested !== 'auto' && requested !== resolved) {
+      logger.warn(
+        'voice resolve MISMATCH: requested=%s resolved=%s (fallback) — check config.voice / settings.json / voiceDir files',
+        requested, resolved,
+      )
+    }
+    return voice
   }
 
   function consumePending(channelId: string, bot: Bot, platform: string): void {
@@ -220,12 +231,14 @@ export function apply(ctx: Context, config: Config) {
     void (async () => {
       try {
         const rendered = await renderVoice(text)
-        const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, currentVoice() ?? undefined)
+        const voice = currentVoice()
+        const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, voice ?? undefined)
         await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl)
         lastSpeakAt.set(channelId, Date.now())
         logger.info(
-          'voice sent (text replaced) channel=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s rendered=%s',
-          channelId, out.pcmBytes, out.durationMs, rendered.source, rendered.ratio.toFixed(3), rendered.degraded,
+          'voice sent (text replaced) channel=%s voice=%s path=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s rendered=%s',
+          channelId, voice?.name ?? 'none', voice?.path ?? '', out.pcmBytes, out.durationMs, rendered.source,
+          rendered.ratio.toFixed(3), rendered.degraded,
           rendered.reason ? ` reason=${rendered.reason}` : '', rendered.text.slice(0, 40),
         )
       } catch (err) {
@@ -437,12 +450,14 @@ export function apply(ctx: Context, config: Config) {
         void (async () => {
           try {
             const rendered = await renderVoice(text)
-            const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, currentVoice() ?? undefined)
+            const voice = currentVoice()
+            const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, voice ?? undefined)
             await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl)
             lastSpeakAt.set(channelId, Date.now())
             logger.info(
-              'voice sent channel=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s wav=%s',
-              channelId, out.pcmBytes, out.durationMs, rendered.source, rendered.ratio.toFixed(3), rendered.degraded,
+              'voice sent channel=%s voice=%s path=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s wav=%s',
+              channelId, voice?.name ?? 'none', voice?.path ?? '', out.pcmBytes, out.durationMs, rendered.source,
+              rendered.ratio.toFixed(3), rendered.degraded,
               rendered.reason ? ` reason=${rendered.reason}` : '', out.wavPath,
             )
           } catch (err) {

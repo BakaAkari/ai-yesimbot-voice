@@ -1,5 +1,5 @@
 import { describe, test, expect, vi } from 'vitest'
-import { render, ruleLayer, fidelityRatio, injectBreath } from '../src/preprocess.js'
+import { render, ruleLayer, fidelityRatio, injectBreath, stripProsodyMarkers } from '../src/preprocess.js'
 import type { LlmChannel } from '../src/llm-channel.js'
 
 const baseOpts = {
@@ -82,7 +82,44 @@ describe('render — no LLM channel', () => {
 
   test('injectBreath=true adds breath marks when ≥3 sentences', async () => {
     const r = await render('第一。第二。第三。', { ...baseOpts, injectBreath: true })
-    expect(r.text).toContain('[breath]')
+    // zero_shot：即使注入了 [breath]，最终文本也会被统一剥除，避免模型提前截断
+    expect(r.text).not.toContain('[breath]')
+  })
+
+  test('LLM output with [breath]/[laughter] markers is stripped', async () => {
+    const ch = fakeChannel(async () => '嗯，先稳住。[breath] 明天啊。[laughter]')
+    const r = await render('嗯，先稳住。明天啊。', { ...baseOpts, llm: ch, injectBreath: true })
+    expect(r.text).not.toContain('[breath]')
+    expect(r.text).not.toContain('[laughter]')
+    expect(r.text).toContain('先稳住')
+    expect(r.text).toContain('明天啊')
+  })
+})
+
+describe('stripProsodyMarkers', () => {
+  test('removes latin bracket markers', () => {
+    expect(stripProsodyMarkers('先。[breath]后。')).toBe('先。后。')
+    expect(stripProsodyMarkers('哈哈[laughter]')).toBe('哈哈')
+    expect(stripProsodyMarkers('嗯。[sigh]')).toBe('嗯。')
+  })
+  test('removes CJK bracket markers', () => {
+    expect(stripProsodyMarkers('先。[笑声]后。')).toBe('先。后。')
+    expect(stripProsodyMarkers('先。[停顿]再。')).toBe('先。再。')
+    expect(stripProsodyMarkers('[轻声]别激动')).toBe('别激动')
+  })
+  test('removes multi-word and consecutive markers', () => {
+    expect(stripProsodyMarkers('先。[quick_breath]后。')).toBe('先。后。')
+    expect(stripProsodyMarkers('先。[breath][laugh]后。')).toBe('先。后。')
+    expect(stripProsodyMarkers('先 [slow] 后')).toBe('先 后')
+  })
+  test('cleans leftover whitespace before punctuation', () => {
+    expect(stripProsodyMarkers('明天啊。 [breath] 那就这样吧。')).toBe('明天啊。那就这样吧。')
+    expect(stripProsodyMarkers('  [breath]  你好  ')).toBe('你好')
+  })
+  test('keeps normal brackets and text', () => {
+    expect(stripProsodyMarkers('你好（世界）')).toBe('你好（世界）')
+    expect(stripProsodyMarkers('')).toBe('')
+    expect(stripProsodyMarkers('a · b')).toBe('a · b')
   })
 })
 
@@ -126,7 +163,8 @@ describe('render — LLM channel', () => {
     const ch = fakeChannel(async () => '第一句。第二句。第三句。')
     const r = await render('第一。第二。第三。', { ...baseOpts, llm: ch, fidelityRatio: 0.5, injectBreath: true })
     expect(r.source).toBe('llm')
-    expect(r.text).toContain('[breath]')
+    // zero_shot：最终文本统一剥除 [breath] 等标记，避免模型提前截断
+    expect(r.text).not.toContain('[breath]')
   })
 
   test('logPrompts uses logger.info', async () => {

@@ -207,7 +207,7 @@ async function sendViaNapcat(baseUrl, channelId, wavPath) {
 async function render(input, opts) {
   const rules = ruleLayer(input);
   if (!opts.llm) {
-    const text2 = opts.injectBreath ? injectBreath(rules) : rules;
+    const text2 = stripProsodyMarkers(opts.injectBreath ? injectBreath(rules) : rules);
     return { text: text2, ratio: 1, source: "rules", degraded: false };
   }
   let raw = null;
@@ -228,15 +228,15 @@ async function render(input, opts) {
   const trimmed = raw?.trim() ?? "";
   if (!trimmed) {
     if (failReason && opts.logger) opts.logger.warn("llm rewrite failed: %s", failReason);
-    const text2 = opts.injectBreath ? injectBreath(rules) : rules;
+    const text2 = stripProsodyMarkers(opts.injectBreath ? injectBreath(rules) : rules);
     return { text: text2, ratio: 1, source: "rules", degraded: true, reason: failReason ?? "empty" };
   }
   const ratio = fidelityRatio(rules, trimmed);
   if (ratio < opts.fidelityRatio) {
-    const text2 = opts.injectBreath ? injectBreath(rules) : rules;
+    const text2 = stripProsodyMarkers(opts.injectBreath ? injectBreath(rules) : rules);
     return { text: text2, ratio, source: "rules", degraded: true, reason: "fidelity" };
   }
-  const text = opts.injectBreath ? injectBreath(trimmed) : trimmed;
+  const text = stripProsodyMarkers(opts.injectBreath ? injectBreath(trimmed) : trimmed);
   return { text, ratio, source: "llm", degraded: false };
 }
 function ruleLayer(text) {
@@ -291,6 +291,14 @@ function lcsLength(a, b) {
   return prev[n] ?? 0;
 }
 var BREATH_MARK_RE = /\[(breath|quick_breath|sigh|laughter|cough|noise)\]\s*$/;
+function stripProsodyMarkers(text) {
+  if (!text) return "";
+  let s = text.replace(/\[[^\[\]]*\]/g, "");
+  s = s.replace(/[ \t]+/g, " ");
+  s = s.replace(/ +([。！？!?，,、；;])/g, "$1");
+  s = s.replace(/([。！？!?，,、；;]) +/g, "$1");
+  return s.trim();
+}
 function injectBreath(text) {
   if (!text) return "";
   const parts = [];
@@ -412,7 +420,7 @@ var DEFAULT_LLM_PROMPT = `\u4F60\u662F\u4E13\u4E1A\u7684\u58F0\u97F3\u5BFC\u6F14
 \u8981\u6C42\uFF1A
 1. \u4FDD\u7559\u539F\u610F\u4E0E\u4FE1\u606F\uFF0C\u4E0D\u5F97\u589E\u5220\u4E8B\u5B9E\u3001\u4E0D\u5F97\u6539\u4EBA\u79F0/\u6570\u5B57/\u4E13\u6709\u540D\u8BCD
 2. \u52A0\u5165\u81EA\u7136\u7684\u53E3\u8BED\u8282\u594F\uFF1A\u9002\u5F53\u65AD\u53E5\u3001\u505C\u987F\u63D0\u793A\u3001\u8BED\u6C14\u8BCD\uFF08\u55EF\u3001\u554A\u3001\u54C8\uFF09\uFF0C\u589E\u5F3A\u60C5\u7EEA\u8868\u8FBE
-3. \u6587\u672C\u4E2D\u53EF\u7528\u4EE5\u4E0B\u6807\u8BB0\u63A7\u5236\u97F5\u5F8B\uFF1A[breath] \u6362\u6C14 [laughter] \u7B11\u58F0 [sigh] \u53F9\u6C14\uFF08\u9002\u91CF\u4F7F\u7528\uFF0C\u6BCF\u53E5\u6700\u591A 1 \u4E2A\uFF09
+3. \u4E0D\u8981\u63D2\u5165\u4EFB\u4F55\u65B9\u62EC\u53F7\u6807\u8BB0\uFF08\u5982 [breath] \u7B49\u4F1A\u88AB\u4E22\u5F03\uFF09
 4. \u6807\u70B9\u89C4\u8303\u5316\uFF1A\u53E5\u672B\u5FC5\u987B\u6709\u53E5\u53F7/\u95EE\u53F7/\u611F\u53F9\u53F7\uFF1B\u9017\u53F7\u8868\u793A\u77ED\u505C\u987F\uFF0C\u53E5\u53F7\u8868\u793A\u957F\u505C\u987F
 5. \u82F1\u6587\u5355\u8BCD\u4FDD\u6301\u539F\u6837\uFF0C\u524D\u540E\u52A0\u7A7A\u683C\uFF1B\u6570\u5B57\u6309\u81EA\u7136\u8BFB\u6CD5\u6539\u5199\uFF08\u5982 3.5 \u2192 \u4E09\u70B9\u4E94\uFF09
 6. \u53EA\u8F93\u51FA\u6539\u5199\u540E\u7684\u6587\u672C\u672C\u8EAB\uFF0C\u4E0D\u8981\u89E3\u91CA\u3001\u4E0D\u8981\u5F15\u53F7\u3001\u4E0D\u8981 markdown
@@ -503,7 +511,8 @@ function apply(ctx, config) {
   const renderOpts = {
     llm: llmChannel,
     fidelityRatio: 0.95,
-    injectBreath: true,
+    // zero_shot 下 [breath] 等韵律标记会导致模型提前截断→音频不完整，关闭注入（最终文本还会统一剥除标记）
+    injectBreath: false,
     timeoutMs: 6e4,
     prompt: DEFAULT_LLM_PROMPT,
     logPrompts: false,
@@ -536,7 +545,17 @@ function apply(ctx, config) {
     return true;
   }
   function currentVoice() {
-    return voices.resolve(resolveCurrentVoice());
+    const requested = resolveCurrentVoice();
+    const voice = voices.resolve(requested);
+    const resolved = voice?.name ?? null;
+    if (requested && requested !== "auto" && requested !== resolved) {
+      logger.warn(
+        "voice resolve MISMATCH: requested=%s resolved=%s (fallback) \u2014 check config.voice / settings.json / voiceDir files",
+        requested,
+        resolved
+      );
+    }
+    return voice;
   }
   function consumePending(channelId, bot, platform) {
     const item = pendingVoice.get(channelId);
@@ -548,12 +567,15 @@ function apply(ctx, config) {
     void (async () => {
       try {
         const rendered = await renderVoice(text);
-        const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, currentVoice() ?? void 0);
+        const voice = currentVoice();
+        const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, voice ?? void 0);
         await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl);
         lastSpeakAt.set(channelId, Date.now());
         logger.info(
-          "voice sent (text replaced) channel=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s rendered=%s",
+          "voice sent (text replaced) channel=%s voice=%s path=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s rendered=%s",
           channelId,
+          voice?.name ?? "none",
+          voice?.path ?? "",
           out.pcmBytes,
           out.durationMs,
           rendered.source,
@@ -737,12 +759,15 @@ ${lines}
         void (async () => {
           try {
             const rendered = await renderVoice(text);
-            const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, currentVoice() ?? void 0);
+            const voice = currentVoice();
+            const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, voice ?? void 0);
             await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl);
             lastSpeakAt.set(channelId, Date.now());
             logger.info(
-              "voice sent channel=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s wav=%s",
+              "voice sent channel=%s voice=%s path=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s wav=%s",
               channelId,
+              voice?.name ?? "none",
+              voice?.path ?? "",
               out.pcmBytes,
               out.durationMs,
               rendered.source,

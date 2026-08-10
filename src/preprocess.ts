@@ -38,7 +38,7 @@ export interface RenderResult {
 export async function render(input: string, opts: RenderOptions): Promise<RenderResult> {
   const rules = ruleLayer(input)
   if (!opts.llm) {
-    const text = opts.injectBreath ? injectBreath(rules) : rules
+    const text = stripProsodyMarkers(opts.injectBreath ? injectBreath(rules) : rules)
     return { text, ratio: 1, source: 'rules', degraded: false }
   }
 
@@ -62,17 +62,17 @@ export async function render(input: string, opts: RenderOptions): Promise<Render
   const trimmed = raw?.trim() ?? ''
   if (!trimmed) {
     if (failReason && opts.logger) opts.logger.warn('llm rewrite failed: %s', failReason)
-    const text = opts.injectBreath ? injectBreath(rules) : rules
+    const text = stripProsodyMarkers(opts.injectBreath ? injectBreath(rules) : rules)
     return { text, ratio: 1, source: 'rules', degraded: true, reason: failReason ?? 'empty' }
   }
 
   const ratio = fidelityRatio(rules, trimmed)
   if (ratio < opts.fidelityRatio) {
-    const text = opts.injectBreath ? injectBreath(rules) : rules
+    const text = stripProsodyMarkers(opts.injectBreath ? injectBreath(rules) : rules)
     return { text, ratio, source: 'rules', degraded: true, reason: 'fidelity' }
   }
 
-  const text = opts.injectBreath ? injectBreath(trimmed) : trimmed
+  const text = stripProsodyMarkers(opts.injectBreath ? injectBreath(trimmed) : trimmed)
   return { text, ratio, source: 'llm', degraded: false }
 }
 
@@ -147,6 +147,19 @@ function lcsLength(a: string, b: string): number {
 }
 
 const BREATH_MARK_RE = /\[(breath|quick_breath|sigh|laughter|cough|noise)\]\s*$/
+
+/**
+ * 剥除所有 [xxx] 语气/节奏/氛围标记（中英文、任意内容的括号标记，如 [breath]、[笑声]、[停顿]、[whisper]、[quick_breath]）。
+ * zero_shot 下这些标记会导致模型提前截断→音频不完整，统一去掉；并清理剥除后残留的冗余空白。
+ */
+export function stripProsodyMarkers(text: string): string {
+  if (!text) return ''
+  let s = text.replace(/\[[^\[\]]*\]/g, '')
+  s = s.replace(/[ \t]+/g, ' ')
+  s = s.replace(/ +([。！？!?，,、；;])/g, '$1')
+  s = s.replace(/([。！？!?，,、；;]) +/g, '$1')
+  return s.trim()
+}
 
 /**
  * [breath] 韵律注入：在句子之间插入换气标记。
