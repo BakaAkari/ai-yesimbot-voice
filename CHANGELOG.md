@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.2] - 2026-08-10
+
+### 重构：与 ai 包彻底解耦（移除安装界面里多余的 `ai >=5` 可选依赖）
+
+**背景**：Koishi 安装该插件时显示 `ai >=5 可选` 依赖。源码只把 `ai` 用于 TypeScript 类型与 `generateText`，运行时本就是复用 Koishi 宿主（yesimbot）里的 `ai` 包，无需插件自身声明。
+
+- `package.json`：从 `peerDependencies` / `peerDependenciesMeta` / `devDependencies` 移除 `ai`（只保留 `koishi` peer）
+- `llm-channel.ts`：删除 `import type { LanguageModel } from 'ai'` 与 `as LanguageModel` 类型断言
+- `vendor/yesimbot-types.d.ts`：`import { LanguageModel, EmbeddingModel } from 'ai'` → 本地最小结构类型
+- 新增 `src/vendor/ai-shim.d.ts`：`declare module 'ai'`（仅让 tsc 通过，不安装该包）
+- 运行时 `await import('ai')` 保留：从 Koishi 宿主取现成 `ai`（外置、不上报依赖，标准 Koishi 模式）
+- 结果：Koishi 插件安装界面不再出现 `ai` 依赖
+
 ## [0.4.1] - 2026-08-10
 
 ### 修复：语音切换链路不可诊断 / 静默回退音色

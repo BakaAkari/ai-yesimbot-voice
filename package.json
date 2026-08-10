@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-aka-yesimbot-voice",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "YesImBot v4 语音组件：回复经 NAS CosyVoice3 TTS 发送语音",
   "license": "MIT",
   "type": "commonjs",
@@ -19,18 +19,11 @@
     "./package.json": "./package.json"
   },
   "peerDependencies": {
-    "koishi": "^4.18.0",
-    "ai": ">=5"
-  },
-  "peerDependenciesMeta": {
-    "ai": {
-      "optional": true
-    }
+    "koishi": "^4.18.0"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
     "@yesimbot/agent-runtime": "0.0.1",
-    "ai": "^7.0.56",
     "koishi": "^4.18.11",
     "rimraf": "^6.0.1",
     "tsup": "^8.5.0",

@@ -1,6 +1,9 @@
 import { Context, Universal, Element, Awaitable, Session, Bot, Schema as Schema$1, Service } from 'koishi';
 import { CustomMessageBase, AgentMessage, AgentPlugin } from '@yesimbot/agent-runtime';
-import { LanguageModel, EmbeddingModel } from 'ai';
+
+// 与 ai 包解耦：用最小结构类型代替 ai 的 LanguageModel/EmbeddingModel（不加该依赖）
+interface LanguageModel { readonly id?: string; readonly provider?: string; [key: string]: unknown }
+interface EmbeddingModel { readonly id?: string; [key: string]: unknown }
 
 type Dict<T = any, K extends string | symbol = string> = {
     [key in K]: T;

@@ -1,5 +1,4 @@
 import type { Context, Logger } from 'koishi'
-import type { LanguageModel } from 'ai'
 
 export interface LlmChannel {
   readonly source: 'yesimbot' | 'custom'
@@ -49,7 +48,7 @@ export function fromYesimbot(ctx: Context, opts: YesimbotChannelOptions = {}): L
       const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs))
       try {
         const result = await mod.generateText({
-          model: ref.model as LanguageModel,
+          model: ref.model,
           prompt: renderPrompt(promptTemplate, text),
           abortSignal: controller.signal,
         } as Parameters<typeof mod.generateText>[0])
