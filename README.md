@@ -4,9 +4,9 @@ YesImBot v4 语音组件：bot 回复经 NAS CosyVoice3 TTS 合成语音，发�
 
 ## 功能
 
-- **语音发送**：bot 回复 → 文本提取 → 策略判定（概率/长度/冷却/群聊）→ TTS 合成（CosyVoice3 instruct2）→ NapCat HTTP API 直发 QQ 群语音
+- **语音发送**：bot 回复 → 文本提取 → 策略判定（概率/长度/冷却/群聊）→ TTS 合成（CosyVoice3 `/inference_zero_shot`）→ NapCat HTTP API 直发 QQ 群语音
 - **文本替换（可选）**：`replaceText: true` 时，命中语音策略的回复**不发送文本，只发语音**；TTS 失败自动补发文本兜底
-- **中英混排**：NAS CosyVoice3 服务端已做短文本 instruct 降级修复（<110 字自动 bare 指令，不念出朗读指令），长文本保留英文发音指导
+- **zero_shot 音色**：音色 = `voiceDir` 下 `<name>.wav` + `<name>.txt`（该音色参考音频的真实转写）。合成时把转写作为 `prompt_text` 传给 `/inference_zero_shot` 做语音条件对齐（不再是朗读指令；更新音源 = 覆盖这两个文件）
 
 ## 配置项
 
@@ -15,14 +15,13 @@ YesImBot v4 语音组件：bot 回复经 NAS CosyVoice3 TTS 合成语音，发�
 | `ttsEnabled` | `true` | 总开关 |
 | `platforms` | `['onebot']` | 生效平台（onebot / lark） |
 | `ttsApiBase` | `http://127.0.0.1:50000` | CosyVoice3 服务地址（NAS `http://100.121.167.1:50000`） |
-| `voicePromptPath` | `''` | 音色 prompt_wav 本地路径（空 = 服务端默认音色） |
-| `instructText` | 中英混排朗读指令 | 朗读指令（服务端会对短文本自动降级为 bare） |
-| `probability` | `0.2` | 每条回复配语音概率 |
-| `minLength` / `maxLength` | `8` / `120` | 文本长度范围才配语音 |
-| `cooldownSeconds` | `120` | 同渠道冷却秒 |
+| `voiceDir` | `data/aka-yesimbot-voice/voices` | 音色源目录：`.wav`(+同名 `.txt` 转写) 即一个音色；放/删文件重启生效 |
+| `probability` | `0.85` | 每条回复配语音概率 |
+| `minLength` / `maxLength` | `4` / `120` | 文本长度范围才配语音 |
+| `cooldownSeconds` | `60` | 同渠道冷却秒 |
 | `groupOnly` | `true` | 仅群聊配语音 |
-| `napcatHttpUrl` | `''` | NapCat HTTP API 地址（QQ 语音直发，如 `http://mita_napcat:6199`）；留空回退 Koishi 元素发送（本地开发） |
-| `replaceText` | `false` | 命中语音时吞掉文本回复，只发语音 |
+| `napcatHttpUrl` | `http://mita_napcat:6199` | NapCat HTTP API 地址（QQ 语音直发）；留空回退 Koishi 元素发送（本地开发） |
+| `replaceText` | `true` | 命中语音时吞掉文本回复，只发语音 |
 
 ## 发送链路（重要）
 

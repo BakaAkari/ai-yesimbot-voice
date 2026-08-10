@@ -7,7 +7,6 @@ const TMP = '/tmp/aka-yesimbot-voice-test'
 const cfg = {
   apiBase: 'http://tts.test:50000',
   timeoutMs: 5000,
-  instructText: '请自然朗读。<|endofprompt|>',
 }
 
 function mockFetch(response: { ok?: boolean; status?: number; body?: Buffer; text?: string }) {
@@ -38,7 +37,7 @@ describe('TtsClient.synthesize', () => {
     rmSync(TMP, { recursive: true, force: true })
   })
 
-  test('posts multipart and writes wav file', async () => {
+  test('posts multipart to /inference_zero_shot and writes wav file', async () => {
     const pcm = Buffer.alloc(4800, 0x00)
     const fetchLike = mockFetch({ body: pcm })
     const client = new TtsClient(cfg, fetchLike as never)
@@ -47,7 +46,7 @@ describe('TtsClient.synthesize', () => {
 
     expect(fetchLike).toHaveBeenCalledTimes(1)
     const [url, init] = fetchLike.mock.calls[0] as [string, { headers: Record<string, string> }]
-    expect(url).toBe('http://tts.test:50000/inference_instruct2')
+    expect(url).toBe('http://tts.test:50000/inference_zero_shot')
     expect(init.headers['Content-Type']).toContain('multipart/form-data')
     expect(result.pcmBytes).toBe(4800)
     expect(existsSync(result.wavPath)).toBe(true)
@@ -56,7 +55,7 @@ describe('TtsClient.synthesize', () => {
     expect(wav.length).toBe(4800 + 44)
   })
 
-  test('includes prompt_wav when voicePromptPath passed to synthesize', async () => {
+  test('includes prompt_wav when voice.path passed to synthesize', async () => {
     const fs = await import('node:fs')
     fs.mkdirSync(TMP, { recursive: true })
     const promptPath = `${TMP}/prompt.wav`
@@ -64,40 +63,41 @@ describe('TtsClient.synthesize', () => {
     const fetchLike = mockFetch({ body: Buffer.alloc(44) })
     const client = new TtsClient(cfg, fetchLike as never)
 
-    await client.synthesize('测试', TMP, 'p.wav', promptPath)
+    await client.synthesize('测试', TMP, 'p.wav', { path: promptPath })
 
     const [, init] = fetchLike.mock.calls[0] as [string, { body: Uint8Array }]
-    const body = Buffer.from(init.body)
-    const bodyText = body.toString('latin1')
+    const bodyText = Buffer.from(init.body).toString('latin1')
     expect(bodyText).toContain('prompt.wav')
     expect(bodyText).toContain('audio/wav')
   })
 
-  test('omits prompt_wav when no voicePromptPath', async () => {
+  test('omits prompt_wav when no voice.path', async () => {
     const fetchLike = mockFetch({ body: Buffer.alloc(44) })
     const client = new TtsClient(cfg, fetchLike as never)
-    await client.synthesize('测试', TMP, 'p.wav')
+    await client.synthesize('测试', TMP, 'p.wav', { transcript: '参考转写' })
     const [, init] = fetchLike.mock.calls[0] as [string, { body: Uint8Array }]
     const bodyText = Buffer.from(init.body).toString('latin1')
     expect(bodyText).not.toContain('prompt.wav')
   })
 
-  test('auto-appends <|endofprompt|> when instruct lacks it', async () => {
+  test('sends voice.transcript as prompt_text', async () => {
     const fetchLike = mockFetch({ body: Buffer.alloc(44) })
-    const client = new TtsClient({ ...cfg, instructText: '自然朗读' }, fetchLike as never)
-    await client.synthesize('测试', TMP, 'p.wav')
+    const client = new TtsClient(cfg, fetchLike as never)
+    await client.synthesize('测试', TMP, 'p.wav', { transcript: '大家好，很高兴见到你' })
     const [, init] = fetchLike.mock.calls[0] as [string, { body: Uint8Array }]
-    const bodyText = Buffer.from(init.body).toString('latin1')
-    expect(bodyText).toContain('<|endofprompt|>')
+    const bodyText = Buffer.from(init.body).toString('utf8')
+    expect(bodyText).toContain('name="prompt_text"')
+    expect(bodyText).toContain('大家好，很高兴见到你')
   })
 
-  test('keeps existing <|endofprompt|> in instruct', async () => {
+  test('sends empty prompt_text when no transcript', async () => {
     const fetchLike = mockFetch({ body: Buffer.alloc(44) })
-    const client = new TtsClient({ ...cfg, instructText: '自然朗读。<|endofprompt|>' }, fetchLike as never)
+    const client = new TtsClient(cfg, fetchLike as never)
     await client.synthesize('测试', TMP, 'p.wav')
     const [, init] = fetchLike.mock.calls[0] as [string, { body: Uint8Array }]
     const bodyText = Buffer.from(init.body).toString('latin1')
-    expect(bodyText.match(/<\|endofprompt\|>/g)).toHaveLength(1)
+    expect(bodyText).toContain('name="prompt_text"')
+    expect(bodyText).not.toContain('请用自然流畅的中英双语朗读')
   })
 
   test('throws on http error', async () => {

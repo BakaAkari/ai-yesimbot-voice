@@ -7,7 +7,7 @@ import { decide, type TtsPolicyConfig } from './policy.js'
 import { sendVoice } from './sender.js'
 import { render, type RenderOptions } from './preprocess.js'
 import { fromYesimbot, type LlmChannel } from './llm-channel.js'
-import { VoiceLibrary } from './voices.js'
+import { VoiceLibrary, type VoiceInfo } from './voices.js'
 
 const DEFAULT_LLM_PROMPT = `你是专业的声音导演。把下面的对话回复改写成\"朗读友好文本\"，交给 CosyVoice 合成语音。
 要求：
@@ -45,8 +45,6 @@ export interface Config {
   advanced: {
     /** CosyVoice3 服务地址 */
     ttsApiBase: string
-    /** 朗读指令（中英混排） */
-    instructText: string
     /** 合成超时 ms */
     ttsTimeoutMs: number
     /** 最短触发文本长度（字符） */
@@ -67,16 +65,15 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
-  voice: Schema.string()
+  voice: Schema.dynamic('yesimbot-voice.voices')
     .default('auto')
-    .description('当前音色：auto=音色目录第一个，或直接填音色名（如 leijun / gs_Collei）'),
-  probability: Schema.number().min(0).max(1).default(0.85).description('每条回复配语音概率'),
+    .description('当前音色：auto=音色目录第一个；下拉选择或搜索音色名'),
+  probability: Schema.number().min(0).max(1).default(1.0).description('每条回复配语音概率'),
   llm: Schema.boolean().default(true).description('LLM 语音效果渲染（走 yesimbot 主模型；失败自动降级规则层）'),
   voiceDir: Schema.string().default('data/aka-yesimbot-voice/voices').description('音色源目录：往里放/删 *.wav 即增删音色（重启生效）'),
 
   advanced: Schema.object({
     ttsApiBase: Schema.string().default('http://100.121.167.1:50000').description('CosyVoice3 服务地址'),
-    instructText: Schema.string().default('请用自然流畅的中英双语朗读，英文单词使用标准英语发音，注意断句和停顿，语速适中。<|endofprompt|>').description('朗读指令'),
     ttsTimeoutMs: Schema.number().min(1000).max(120000).default(30000).description('合成超时 ms'),
     minLength: Schema.number().min(0).default(4).description('最短触发文本长度（字符）'),
     maxLength: Schema.number().min(0).default(120).description('最长触发文本长度（字符）'),
@@ -94,7 +91,6 @@ export function apply(ctx: Context, config: Config) {
   const tts = new TtsClient({
     apiBase: adv.ttsApiBase,
     timeoutMs: adv.ttsTimeoutMs,
-    instructText: adv.instructText,
   } satisfies TtsClientConfig)
 
   // 音色库：volatile 生命周期内每次解析都重新扫描目录（放/删音色重启生效）
@@ -104,13 +100,13 @@ export function apply(ctx: Context, config: Config) {
 
   // 当前音色持久化（settings.json，重启不丢）。优先级：settings 覆盖 config.voice。
   const settingsPath = join(dirname(absVoiceDir), 'settings.json')
-  function loadSavedVoice(): string {
+  function readSavedVoice(): string | undefined {
     try {
       const { readFileSync } = require('node:fs') as typeof import('node:fs')
       const data = JSON.parse(readFileSync(settingsPath, 'utf8')) as { voice?: string }
       if (typeof data.voice === 'string' && data.voice) return data.voice
     } catch { /* 无或损坏 */ }
-    return config.voice
+    return undefined
   }
   function saveVoice(name: string): void {
     try {
@@ -121,7 +117,41 @@ export function apply(ctx: Context, config: Config) {
       logger.warn('save voice settings failed: %s', err instanceof Error ? err.message : String(err))
     }
   }
-  let currentVoice = loadSavedVoice()
+  // 当前音色：每次动态解析（settings 优先，否则 config.voice）。
+  // 这样控制台改 voice 字段无需重启即时生效；.voice 命令写 settings 也即时覆盖。
+  // 注意：Koishi 会在配置保存时更新传入的 config 对象引用，因此读 config.voice 始终取到最新值。
+  let savedVoiceOverride = readSavedVoice()
+  function resolveCurrentVoice(): string {
+    if (savedVoiceOverride) return savedVoiceOverride
+    return config.voice || 'auto'
+  }
+
+  // —— 动态音色下拉：ctx.schema.set 注册可搜索的 union 选项源（机制同 chatluna / ai-image-generator）
+  // 支持控制台 voice 字段下拉/搜索；目录变化时重建即可实时更新。
+  const registerVoiceOptions = () => {
+    const list = voices.scan()
+    if (!(ctx as any).schema) {
+      logger.warn('voice schema: ctx.schema service unavailable')
+      return
+    }
+    try {
+      const options = [
+        Schema.const('auto').description('auto（音色目录第一个）'),
+        ...list.map((v) => Schema.const(v.name).description(v.name)),
+      ]
+      ;(ctx as any).schema.set('yesimbot-voice.voices', Schema.union(options))
+      logger.info('voice schema dynamic source registered: yesimbot-voice.voices (%d options)', list.length + 1)
+    } catch (err) {
+      logger.warn('voice schema dynamic source register failed: %s', err instanceof Error ? err.message : String(err))
+    }
+  }
+  registerVoiceOptions()
+
+  // 定时重建音色选项（放/删 wav 后自动更新下拉，无需重启）
+  const rescanTimer = setInterval(() => {
+    registerVoiceOptions()
+  }, 30_000)
+  ctx.on('dispose', () => clearInterval(rescanTimer))
 
   // 语音效果渲染通道（llm=false → 只跑规则层；yesimbot 通道构建失败自动降级规则层）
   let llmChannel: LlmChannel | null = null
@@ -161,10 +191,23 @@ export function apply(ctx: Context, config: Config) {
   // 每个 channel 最近 turn 的 <message> 段（onAppend 记录，patch 匹配用）
   // 只吞"发送文本 == 某 turn 回复段"的调用 → 指令返回/其他插件发送永不吞
   const turnSegments = new Map<string, string[]>()
+  // 手动触发的一次性语音标记：.说话 指令给 channel 打标（带 TTL），下一次回复强制走语音，消费后清除
+  // Map<channelId, 过期时间戳>；TTL 120s，避免命令后无回复导致标记残留
+  const forceVoiceChannels = new Map<string, number>()
+  const FORCE_VOICE_TTL = 120_000
+  function isForceArmed(channelId: string): boolean {
+    const exp = forceVoiceChannels.get(channelId)
+    if (exp === undefined) return false
+    if (Date.now() > exp) {
+      forceVoiceChannels.delete(channelId)
+      return false
+    }
+    return true
+  }
 
-  /** 解析当前音色 wav 路径（auto/具名）；目录无音色返回 null（回退服务端默认音色） */
-  function currentVoicePath(): string | undefined {
-    return voices.resolve(currentVoice)?.path
+  /** 解析当前音色（auto/具名，含参考音频路径 + 转写）；目录无音色返回 null */
+  function currentVoice(): VoiceInfo | null {
+    return voices.resolve(resolveCurrentVoice())
   }
 
   function consumePending(channelId: string, bot: Bot, platform: string): void {
@@ -177,7 +220,7 @@ export function apply(ctx: Context, config: Config) {
     void (async () => {
       try {
         const rendered = await renderVoice(text)
-        const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, currentVoicePath())
+        const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, currentVoice() ?? undefined)
         await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl)
         lastSpeakAt.set(channelId, Date.now())
         logger.info(
@@ -256,7 +299,7 @@ export function apply(ctx: Context, config: Config) {
     .action(async ({ session }) => {
       if (!session) return '需要会话上下文。'
       const list = voices.scan()
-      const current = voices.resolve(currentVoice)
+      const current = voices.resolve(resolveCurrentVoice())
       if (!list.length) return '音色目录为空：往 voiceDir 放入 *.wav（重启生效）。'
       const lines = list.map((v) => `${v.name === current?.name ? '● ' : '○ '}${v.name}`).join('\n')
       return `当前音色：${current?.name ?? '（无）'}\n可用音色：\n${lines}\n\n用 .voice <音色名> 切换`
@@ -269,10 +312,24 @@ export function apply(ctx: Context, config: Config) {
       const list = voices.scan()
       const found = list.find((v) => v.name === name)
       if (!found) return `没有音色「${name}」。用 .voice 查看可用列表。`
-      currentVoice = name
+      savedVoiceOverride = name
       saveVoice(name)
       logger.info('voice switched to %s by user', name)
       return `✅ 已切换到音色「${name}」（已保存，重启不丢）。`
+    })
+
+  // —— .说话 指令：手动触发下一次回复用语音（一次性） ——
+  ctx.command('说话', '让 bot 下一条回复用语音（一次性）')
+    .action(async ({ session }) => {
+      if (!session) return '需要会话上下文。'
+      const cid = String(session.channelId ?? session.cid ?? '')
+      if (!cid) return '无法确定会话频道。'
+      // 延迟 300ms 再武装：让本命令返回的"🔊 收到"文本先正常发出（不走语音）
+      setTimeout(() => {
+        forceVoiceChannels.set(cid, Date.now() + FORCE_VOICE_TTL)
+        logger.info('.说话 force-voice armed channel=%s (voice=%s)', cid, resolveCurrentVoice())
+      }, 300)
+      return '🔊 收到，下一句我用语音回你。'
     })
 
   const yesimbot = (ctx as any).yesimbot
@@ -298,6 +355,14 @@ export function apply(ctx: Context, config: Config) {
         if (text && isShared && !pendingVoice.has(cidStr)) {
           const segments = turnSegments.get(cidStr) ?? []
           const isTurnReply = segments.includes(text)
+          const forced = isForceArmed(cidStr) // 校验且在有效期
+          // force-voice 优先：.说话 后本群下一条 bot 发送即强制语音（不依赖 isTurnReply）
+          if (forced) {
+            forceVoiceChannels.delete(cidStr) // 一次性消费
+            logger.info('text replaced by voice (forced) channel=%s reason=force-voice text=%s', cidStr, text.slice(0, 30))
+            queuePending(bot, cidStr, platform, text)
+            return []
+          }
           if (isTurnReply) {
             const decision = decide(policyCfg, {
               text,
@@ -308,7 +373,7 @@ export function apply(ctx: Context, config: Config) {
               lastSpeakAt: lastSpeakAt.get(cidStr) ?? 0,
             })
             if (decision.speak) {
-              logger.info('text replaced by voice channel=%s text=%s', cidStr, text.slice(0, 30))
+              logger.info('text replaced by voice channel=%s reason=%s text=%s', cidStr, decision.reason, text.slice(0, 30))
               queuePending(bot, cidStr, platform, text)
               return []
             }
@@ -343,7 +408,8 @@ export function apply(ctx: Context, config: Config) {
       // replaceText 模式：turn 结束立即消费；否则在 turn 结束按策略附带语音
       async onTurnFinish(result: TurnResult) {
         if (adv.replaceText) {
-          turnSegments.delete(channelId)
+          // 不删 turnSegments：让 sendMessage patch 在消费语音时能读到段去匹配。
+          // （旧实现这里 delete 导致 sendMessage 读 isTurnReply 永远 false，语音永不触发）
           const item = pendingVoice.get(channelId)
           if (item && !item.consumed) {
             consumePending(channelId, bot, platform)
@@ -371,7 +437,7 @@ export function apply(ctx: Context, config: Config) {
         void (async () => {
           try {
             const rendered = await renderVoice(text)
-            const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, currentVoicePath())
+            const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, currentVoice() ?? undefined)
             await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl)
             lastSpeakAt.set(channelId, Date.now())
             logger.info(
@@ -389,7 +455,7 @@ export function apply(ctx: Context, config: Config) {
   })
 
   const voiceName = (() => {
-    const v = voices.resolve(currentVoice)
+    const v = voices.resolve(resolveCurrentVoice())
     return v ? v.name : '(none)'
   })()
   logger.info(

@@ -20,8 +20,6 @@ interface Config {
     advanced: {
         /** CosyVoice3 服务地址 */
         ttsApiBase: string;
-        /** 朗读指令（中英混排） */
-        instructText: string;
         /** 合成超时 ms */
         ttsTimeoutMs: number;
         /** 最短触发文本长度（字符） */

@@ -46,12 +46,12 @@ var TtsClient = class {
     this.config = config;
     this.fetchLike = fetchLike;
   }
-  async synthesize(text, outDir, outName = "voice.wav", voicePromptPath) {
+  async synthesize(text, outDir, outName = "voice.wav", voice) {
     const startedAt = Date.now();
-    const { apiBase, timeoutMs, instructText } = this.config;
+    const { apiBase, timeoutMs } = this.config;
     const boundary = `----akaTts${Date.now()}${Math.random().toString(16).slice(2)}`;
     const chunks = [];
-    const safeInstruct = instructText.includes("<|endofprompt|>") ? instructText : `${instructText.trim()}<|endofprompt|>`;
+    const promptText = (voice?.transcript ?? "").trim();
     const pushField = (name2, value) => {
       chunks.push(Buffer.from(`--${boundary}\r
 Content-Disposition: form-data; name="${name2}"\r
@@ -60,10 +60,10 @@ ${value}\r
 `));
     };
     pushField("tts_text", text);
-    pushField("instruct_text", safeInstruct);
-    if (voicePromptPath) {
+    pushField("prompt_text", promptText);
+    if (voice?.path) {
       const fs2 = await import("fs");
-      const audio = await fs2.promises.readFile(voicePromptPath);
+      const audio = await fs2.promises.readFile(voice.path);
       chunks.push(Buffer.from(`--${boundary}\r
 Content-Disposition: form-data; name="prompt_wav"; filename="prompt.wav"\r
 Content-Type: audio/wav\r
@@ -78,7 +78,7 @@ Content-Type: audio/wav\r
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let response;
     try {
-      response = await this.fetchLike(`${apiBase}/inference_instruct2`, {
+      response = await this.fetchLike(`${apiBase}/inference_zero_shot`, {
         method: "POST",
         headers: { "Content-Type": `multipart/form-data; boundary=${boundary}` },
         body: new Uint8Array(Buffer.concat(chunks)),
@@ -348,6 +348,17 @@ function fromYesimbot(ctx, opts = {}) {
 // src/voices.ts
 var import_node_fs = require("fs");
 var import_node_path = require("path");
+function readVoiceTranscript(dir, baseName) {
+  const candidates = [`${baseName}.txt`, "ref_transcript.txt"];
+  for (const c of candidates) {
+    try {
+      const content = (0, import_node_fs.readFileSync)((0, import_node_path.join)(dir, c), "utf8").trim();
+      if (content) return content;
+    } catch {
+    }
+  }
+  return void 0;
+}
 var VoiceLibrary = class {
   constructor(dir) {
     this.dir = dir;
@@ -363,13 +374,18 @@ var VoiceLibrary = class {
     const voices = [];
     for (const entry of entries) {
       if (!entry.toLowerCase().endsWith(".wav")) continue;
+      const baseName = entry.slice(0, -4);
       const path = (0, import_node_path.join)(this.dir, entry);
       try {
         if ((0, import_node_fs.statSync)(path).size < 1024) continue;
       } catch {
         continue;
       }
-      voices.push({ name: entry.slice(0, -4), path });
+      voices.push({
+        name: baseName,
+        path,
+        transcript: readVoiceTranscript(this.dir, baseName)
+      });
     }
     voices.sort((a, b) => a.name.localeCompare(b.name));
     return voices;
@@ -407,13 +423,12 @@ var DEFAULT_LLM_PROMPT = `\u4F60\u662F\u4E13\u4E1A\u7684\u58F0\u97F3\u5BFC\u6F14
 var name = "aka-yesimbot-voice";
 var inject = ["yesimbot"];
 var Config = import_koishi2.Schema.object({
-  voice: import_koishi2.Schema.string().default("auto").description("\u5F53\u524D\u97F3\u8272\uFF1Aauto=\u97F3\u8272\u76EE\u5F55\u7B2C\u4E00\u4E2A\uFF0C\u6216\u76F4\u63A5\u586B\u97F3\u8272\u540D\uFF08\u5982 leijun / gs_Collei\uFF09"),
-  probability: import_koishi2.Schema.number().min(0).max(1).default(0.85).description("\u6BCF\u6761\u56DE\u590D\u914D\u8BED\u97F3\u6982\u7387"),
+  voice: import_koishi2.Schema.dynamic("yesimbot-voice.voices").default("auto").description("\u5F53\u524D\u97F3\u8272\uFF1Aauto=\u97F3\u8272\u76EE\u5F55\u7B2C\u4E00\u4E2A\uFF1B\u4E0B\u62C9\u9009\u62E9\u6216\u641C\u7D22\u97F3\u8272\u540D"),
+  probability: import_koishi2.Schema.number().min(0).max(1).default(1).description("\u6BCF\u6761\u56DE\u590D\u914D\u8BED\u97F3\u6982\u7387"),
   llm: import_koishi2.Schema.boolean().default(true).description("LLM \u8BED\u97F3\u6548\u679C\u6E32\u67D3\uFF08\u8D70 yesimbot \u4E3B\u6A21\u578B\uFF1B\u5931\u8D25\u81EA\u52A8\u964D\u7EA7\u89C4\u5219\u5C42\uFF09"),
   voiceDir: import_koishi2.Schema.string().default("data/aka-yesimbot-voice/voices").description("\u97F3\u8272\u6E90\u76EE\u5F55\uFF1A\u5F80\u91CC\u653E/\u5220 *.wav \u5373\u589E\u5220\u97F3\u8272\uFF08\u91CD\u542F\u751F\u6548\uFF09"),
   advanced: import_koishi2.Schema.object({
     ttsApiBase: import_koishi2.Schema.string().default("http://100.121.167.1:50000").description("CosyVoice3 \u670D\u52A1\u5730\u5740"),
-    instructText: import_koishi2.Schema.string().default("\u8BF7\u7528\u81EA\u7136\u6D41\u7545\u7684\u4E2D\u82F1\u53CC\u8BED\u6717\u8BFB\uFF0C\u82F1\u6587\u5355\u8BCD\u4F7F\u7528\u6807\u51C6\u82F1\u8BED\u53D1\u97F3\uFF0C\u6CE8\u610F\u65AD\u53E5\u548C\u505C\u987F\uFF0C\u8BED\u901F\u9002\u4E2D\u3002<|endofprompt|>").description("\u6717\u8BFB\u6307\u4EE4"),
     ttsTimeoutMs: import_koishi2.Schema.number().min(1e3).max(12e4).default(3e4).description("\u5408\u6210\u8D85\u65F6 ms"),
     minLength: import_koishi2.Schema.number().min(0).default(4).description("\u6700\u77ED\u89E6\u53D1\u6587\u672C\u957F\u5EA6\uFF08\u5B57\u7B26\uFF09"),
     maxLength: import_koishi2.Schema.number().min(0).default(120).description("\u6700\u957F\u89E6\u53D1\u6587\u672C\u957F\u5EA6\uFF08\u5B57\u7B26\uFF09"),
@@ -429,21 +444,20 @@ function apply(ctx, config) {
   const adv = config.advanced;
   const tts = new TtsClient({
     apiBase: adv.ttsApiBase,
-    timeoutMs: adv.ttsTimeoutMs,
-    instructText: adv.instructText
+    timeoutMs: adv.ttsTimeoutMs
   });
   const absVoiceDir = resolveVoiceDir(ctx, config.voiceDir);
   const outputDir = outputDirOf(absVoiceDir);
   const voices = new VoiceLibrary(absVoiceDir);
   const settingsPath = (0, import_node_path2.join)((0, import_node_path2.dirname)(absVoiceDir), "settings.json");
-  function loadSavedVoice() {
+  function readSavedVoice() {
     try {
-      const { readFileSync: readFileSync2 } = require("fs");
-      const data = JSON.parse(readFileSync2(settingsPath, "utf8"));
+      const { readFileSync: readFileSync3 } = require("fs");
+      const data = JSON.parse(readFileSync3(settingsPath, "utf8"));
       if (typeof data.voice === "string" && data.voice) return data.voice;
     } catch {
     }
-    return config.voice;
+    return void 0;
   }
   function saveVoice(name2) {
     try {
@@ -454,7 +468,33 @@ function apply(ctx, config) {
       logger.warn("save voice settings failed: %s", err instanceof Error ? err.message : String(err));
     }
   }
-  let currentVoice = loadSavedVoice();
+  let savedVoiceOverride = readSavedVoice();
+  function resolveCurrentVoice() {
+    if (savedVoiceOverride) return savedVoiceOverride;
+    return config.voice || "auto";
+  }
+  const registerVoiceOptions = () => {
+    const list = voices.scan();
+    if (!ctx.schema) {
+      logger.warn("voice schema: ctx.schema service unavailable");
+      return;
+    }
+    try {
+      const options = [
+        import_koishi2.Schema.const("auto").description("auto\uFF08\u97F3\u8272\u76EE\u5F55\u7B2C\u4E00\u4E2A\uFF09"),
+        ...list.map((v) => import_koishi2.Schema.const(v.name).description(v.name))
+      ];
+      ctx.schema.set("yesimbot-voice.voices", import_koishi2.Schema.union(options));
+      logger.info("voice schema dynamic source registered: yesimbot-voice.voices (%d options)", list.length + 1);
+    } catch (err) {
+      logger.warn("voice schema dynamic source register failed: %s", err instanceof Error ? err.message : String(err));
+    }
+  };
+  registerVoiceOptions();
+  const rescanTimer = setInterval(() => {
+    registerVoiceOptions();
+  }, 3e4);
+  ctx.on("dispose", () => clearInterval(rescanTimer));
   let llmChannel = null;
   if (config.llm) {
     llmChannel = fromYesimbot(ctx, { logger });
@@ -484,8 +524,19 @@ function apply(ctx, config) {
   const lastSpeakAt = /* @__PURE__ */ new Map();
   const pendingVoice = /* @__PURE__ */ new Map();
   const turnSegments = /* @__PURE__ */ new Map();
-  function currentVoicePath() {
-    return voices.resolve(currentVoice)?.path;
+  const forceVoiceChannels = /* @__PURE__ */ new Map();
+  const FORCE_VOICE_TTL = 12e4;
+  function isForceArmed(channelId) {
+    const exp = forceVoiceChannels.get(channelId);
+    if (exp === void 0) return false;
+    if (Date.now() > exp) {
+      forceVoiceChannels.delete(channelId);
+      return false;
+    }
+    return true;
+  }
+  function currentVoice() {
+    return voices.resolve(resolveCurrentVoice());
   }
   function consumePending(channelId, bot, platform) {
     const item = pendingVoice.get(channelId);
@@ -497,7 +548,7 @@ function apply(ctx, config) {
     void (async () => {
       try {
         const rendered = await renderVoice(text);
-        const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, currentVoicePath());
+        const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, currentVoice() ?? void 0);
         await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl);
         lastSpeakAt.set(channelId, Date.now());
         logger.info(
@@ -563,7 +614,7 @@ function apply(ctx, config) {
   ctx.command("voice", "\u8BED\u97F3\u8BBE\u7F6E\uFF1A\u67E5\u770B / \u5207\u6362\u5F53\u524D\u97F3\u8272").action(async ({ session }) => {
     if (!session) return "\u9700\u8981\u4F1A\u8BDD\u4E0A\u4E0B\u6587\u3002";
     const list = voices.scan();
-    const current = voices.resolve(currentVoice);
+    const current = voices.resolve(resolveCurrentVoice());
     if (!list.length) return "\u97F3\u8272\u76EE\u5F55\u4E3A\u7A7A\uFF1A\u5F80 voiceDir \u653E\u5165 *.wav\uFF08\u91CD\u542F\u751F\u6548\uFF09\u3002";
     const lines = list.map((v) => `${v.name === current?.name ? "\u25CF " : "\u25CB "}${v.name}`).join("\n");
     return `\u5F53\u524D\u97F3\u8272\uFF1A${current?.name ?? "\uFF08\u65E0\uFF09"}
@@ -578,10 +629,20 @@ ${lines}
     const list = voices.scan();
     const found = list.find((v) => v.name === name2);
     if (!found) return `\u6CA1\u6709\u97F3\u8272\u300C${name2}\u300D\u3002\u7528 .voice \u67E5\u770B\u53EF\u7528\u5217\u8868\u3002`;
-    currentVoice = name2;
+    savedVoiceOverride = name2;
     saveVoice(name2);
     logger.info("voice switched to %s by user", name2);
     return `\u2705 \u5DF2\u5207\u6362\u5230\u97F3\u8272\u300C${name2}\u300D\uFF08\u5DF2\u4FDD\u5B58\uFF0C\u91CD\u542F\u4E0D\u4E22\uFF09\u3002`;
+  });
+  ctx.command("\u8BF4\u8BDD", "\u8BA9 bot \u4E0B\u4E00\u6761\u56DE\u590D\u7528\u8BED\u97F3\uFF08\u4E00\u6B21\u6027\uFF09").action(async ({ session }) => {
+    if (!session) return "\u9700\u8981\u4F1A\u8BDD\u4E0A\u4E0B\u6587\u3002";
+    const cid = String(session.channelId ?? session.cid ?? "");
+    if (!cid) return "\u65E0\u6CD5\u786E\u5B9A\u4F1A\u8BDD\u9891\u9053\u3002";
+    setTimeout(() => {
+      forceVoiceChannels.set(cid, Date.now() + FORCE_VOICE_TTL);
+      logger.info(".\u8BF4\u8BDD force-voice armed channel=%s (voice=%s)", cid, resolveCurrentVoice());
+    }, 300);
+    return "\u{1F50A} \u6536\u5230\uFF0C\u4E0B\u4E00\u53E5\u6211\u7528\u8BED\u97F3\u56DE\u4F60\u3002";
   });
   const yesimbot = ctx.yesimbot;
   if (!yesimbot?.registerChannelPlugin) {
@@ -602,6 +663,13 @@ ${lines}
         if (text && isShared && !pendingVoice.has(cidStr)) {
           const segments = turnSegments.get(cidStr) ?? [];
           const isTurnReply = segments.includes(text);
+          const forced = isForceArmed(cidStr);
+          if (forced) {
+            forceVoiceChannels.delete(cidStr);
+            logger.info("text replaced by voice (forced) channel=%s reason=force-voice text=%s", cidStr, text.slice(0, 30));
+            queuePending(bot, cidStr, platform, text);
+            return [];
+          }
           if (isTurnReply) {
             const decision = decide(policyCfg, {
               text,
@@ -612,7 +680,7 @@ ${lines}
               lastSpeakAt: lastSpeakAt.get(cidStr) ?? 0
             });
             if (decision.speak) {
-              logger.info("text replaced by voice channel=%s text=%s", cidStr, text.slice(0, 30));
+              logger.info("text replaced by voice channel=%s reason=%s text=%s", cidStr, decision.reason, text.slice(0, 30));
               queuePending(bot, cidStr, platform, text);
               return [];
             }
@@ -644,7 +712,6 @@ ${lines}
       // replaceText 模式：turn 结束立即消费；否则在 turn 结束按策略附带语音
       async onTurnFinish(result) {
         if (adv.replaceText) {
-          turnSegments.delete(channelId);
           const item = pendingVoice.get(channelId);
           if (item && !item.consumed) {
             consumePending(channelId, bot, platform);
@@ -670,7 +737,7 @@ ${lines}
         void (async () => {
           try {
             const rendered = await renderVoice(text);
-            const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, currentVoicePath());
+            const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, currentVoice() ?? void 0);
             await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl);
             lastSpeakAt.set(channelId, Date.now());
             logger.info(
@@ -693,7 +760,7 @@ ${lines}
     return plugin;
   });
   const voiceName = (() => {
-    const v = voices.resolve(currentVoice);
+    const v = voices.resolve(resolveCurrentVoice());
     return v ? v.name : "(none)";
   })();
   logger.info(

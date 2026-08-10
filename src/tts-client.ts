@@ -4,8 +4,14 @@ export interface TtsClientConfig {
   apiBase: string
   /** 请求超时 ms */
   timeoutMs: number
-  /** instruct_text：朗读指令（中英混排修复方案的核心） */
-  instructText: string
+}
+
+/** 合成所需的音色：参考音频路径 + 可选参考转写（zero_shot 的 prompt_text） */
+export interface TtsVoiceSource {
+  /** 音色参考音频 wav 路径 */
+  path?: string
+  /** 该音色参考音频的真实转写；缺失时以空字符串发送（弱化条件对齐） */
+  transcript?: string
 }
 
 export interface TtsSynthesisResult {
@@ -20,8 +26,11 @@ export interface TtsSynthesisResult {
 const WAV_HEADER_SIZE = 44
 
 /**
- * CosyVoice3 /inference_instruct2 客户端。
- * 请求：multipart（tts_text / instruct_text / prompt_wav）
+ * CosyVoice3 /inference_zero_shot 客户端。
+ * 请求：multipart（tts_text / prompt_text / prompt_wav）
+ *   - tts_text：要朗读的正文
+ *   - prompt_text：参考音频(prompt_wav)的真实转写，zero_shot 语音条件对齐，不是指令
+ *   - prompt_wav：音色参考音频
  * 响应：raw 24kHz 16bit mono PCM → 本地封装 WAV 头。
  * 失败抛错（由调用方静默降级）。
  */
@@ -31,22 +40,22 @@ export class TtsClient {
     private readonly fetchLike: typeof fetch = globalThis.fetch.bind(globalThis),
   ) {}
 
-  async synthesize(text: string, outDir: string, outName = 'voice.wav', voicePromptPath?: string): Promise<TtsSynthesisResult> {
+  async synthesize(text: string, outDir: string, outName = 'voice.wav', voice?: TtsVoiceSource): Promise<TtsSynthesisResult> {
     const startedAt = Date.now()
-    const { apiBase, timeoutMs, instructText } = this.config
+    const { apiBase, timeoutMs } = this.config
     const boundary = `----akaTts${Date.now()}${Math.random().toString(16).slice(2)}`
     const chunks: Buffer[] = []
 
-    // instruct2 端点强制要求 instruct_text 含 <|endofprompt|>，缺失会触发服务端断言失败（LLM 空 token）。
-    const safeInstruct = instructText.includes('<|endofprompt|>') ? instructText : `${instructText.trim()}<|endofprompt|>`
+    // zero_shot：prompt_text = 参考音频转写；服务端自动补 <|endofprompt|>，这里原样发送。
+    const promptText = (voice?.transcript ?? '').trim()
     const pushField = (name: string, value: string) => {
       chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`))
     }
     pushField('tts_text', text)
-    pushField('instruct_text', safeInstruct)
-    if (voicePromptPath) {
+    pushField('prompt_text', promptText)
+    if (voice?.path) {
       const fs = await import('node:fs')
-      const audio = await fs.promises.readFile(voicePromptPath)
+      const audio = await fs.promises.readFile(voice.path)
       chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="prompt_wav"; filename="prompt.wav"\r\nContent-Type: audio/wav\r\n\r\n`))
       chunks.push(audio)
       chunks.push(Buffer.from('\r\n'))
@@ -57,7 +66,7 @@ export class TtsClient {
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     let response: Response
     try {
-      response = await this.fetchLike(`${apiBase}/inference_instruct2`, {
+      response = await this.fetchLike(`${apiBase}/inference_zero_shot`, {
         method: 'POST',
         headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
         body: new Uint8Array(Buffer.concat(chunks)),

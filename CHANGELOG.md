@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.0] - 2026-08-10
+
+### 迁移：instruct2 → zero_shot（完全迁移）
+
+**背景**：instruct2 质量不佳；服务端 `/inference_instruct2` 已被改造成 zero_shot 语义（`instruct_text` 槽位实际作为参考音频转写 prompt_text 使用），旧调用方填入朗读指令会把它当正文念出来。
+
+**音色方案（收在插件内，不依赖 NAS 音色库路径）**
+- 音色 = `voiceDir` 下的 `<name>.wav` + `<name>.txt`（转写）。插件直接从插件内目录读取，更新音源 = 覆盖这两个文件。
+- `voices.ts`：`VoiceInfo` 新增 `transcript`，扫描时读取同名 `<name>.txt`（回退 `ref_transcript.txt`）。
+- 音色库 4 个可用音色的 `<name>.txt` 已按 NAS 训练侧认证转写落盘到 voiceDir。
+
+**TTS 客户端（tts-client.ts）**
+- 端点由 `/inference_instruct2` → `/inference_zero_shot`，字段 `instruct_text` → `prompt_text`。
+- `synthesize(text, outDir, outName, voice: {path, transcript})`：prompt_text = 该音色的参考转写；服务端自动补 `<|endofprompt|>`。
+- 删除配置 `instructText`（接口字段 + Schema 一并移除，不再有任何残留）。
+
+**验证**：单测 59 过；真实音源（halo_marine / mabaoguo）经 `/inference_zero_shot` 出干净人声（voiced 0.5+），无指令泄漏。
+
 ## [0.3.0] - 2026-08-09
 
 ### 重大重构：音色库 + 配置极简化（无旧配置兼容负担）
