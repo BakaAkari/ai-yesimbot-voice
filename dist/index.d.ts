@@ -9,6 +9,8 @@ declare const inject: string[];
  * - advanced：不常改的默认值折叠隐藏
  */
 interface Config {
+    /** 设置页顶部说明（纯信息，不参与运行业务） */
+    hint: object;
     /** 音色名；'auto' = 音色目录按字母序第一个 */
     voice: string;
     /** 每条回复配语音概率 0-1 */

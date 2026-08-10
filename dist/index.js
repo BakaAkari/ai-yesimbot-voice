@@ -431,6 +431,9 @@ var DEFAULT_LLM_PROMPT = `\u4F60\u662F\u4E13\u4E1A\u7684\u58F0\u97F3\u5BFC\u6F14
 var name = "aka-yesimbot-voice";
 var inject = ["yesimbot"];
 var Config = import_koishi2.Schema.object({
+  hint: import_koishi2.Schema.object({}).description(
+    "\u628A\u8FD9\u4E2A Bot \u7684\u56DE\u590D\u8F6C\u6210\u8BED\u97F3\u53D1\u5230 QQ \u7FA4\u3002\n\u97F3\u8272\u76EE\u5F55\uFF1Adata/aka-yesimbot-voice/voices\uFF08\u53EF\u5728\u4E0B\u65B9 voiceDir \u4FEE\u6539\uFF09\u3002\n\u653E\u5165 <\u97F3\u8272\u540D>.wav \u548C\u540C\u540D <\u97F3\u8272\u540D>.txt\uFF08txt = \u8BE5 wav \u53C2\u8003\u97F3\u9891\u7684\u771F\u5B9E\u8F6C\u5199\uFF09\u5373\u65B0\u589E\u97F3\u8272\uFF0C\u91CD\u542F\u540E\u81EA\u52A8\u51FA\u73B0\u5728\u4E0B\u65B9 voice \u4E0B\u62C9\u3002"
+  ),
   voice: import_koishi2.Schema.dynamic("yesimbot-voice.voices").default("auto").description("\u5F53\u524D\u97F3\u8272\uFF1Aauto=\u97F3\u8272\u76EE\u5F55\u7B2C\u4E00\u4E2A\uFF1B\u4E0B\u62C9\u9009\u62E9\u6216\u641C\u7D22\u97F3\u8272\u540D"),
   probability: import_koishi2.Schema.number().min(0).max(1).default(1).description("\u6BCF\u6761\u56DE\u590D\u914D\u8BED\u97F3\u6982\u7387"),
   llm: import_koishi2.Schema.boolean().default(true).description("LLM \u8BED\u97F3\u6548\u679C\u6E32\u67D3\uFF08\u8D70 yesimbot \u4E3B\u6A21\u578B\uFF1B\u5931\u8D25\u81EA\u52A8\u964D\u7EA7\u89C4\u5219\u5C42\uFF09"),

@@ -33,6 +33,8 @@ export const inject = ['yesimbot']
  * - advanced：不常改的默认值折叠隐藏
  */
 export interface Config {
+  /** 设置页顶部说明（纯信息，不参与运行业务） */
+  hint: object
   /** 音色名；'auto' = 音色目录按字母序第一个 */
   voice: string
   /** 每条回复配语音概率 0-1 */
@@ -65,6 +67,9 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
+  hint: Schema.object({}).description(
+    '把这个 Bot 的回复转成语音发到 QQ 群。\n音色目录：data/aka-yesimbot-voice/voices（可在下方 voiceDir 修改）。\n放入 <音色名>.wav 和同名 <音色名>.txt（txt = 该 wav 参考音频的真实转写）即新增音色，重启后自动出现在下方 voice 下拉。',
+  ),
   voice: Schema.dynamic('yesimbot-voice.voices')
     .default('auto')
     .description('当前音色：auto=音色目录第一个；下拉选择或搜索音色名'),
