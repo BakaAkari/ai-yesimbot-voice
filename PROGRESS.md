@@ -1,5 +1,16 @@
 # aka-yesimbot-voice 开发进度（2026-08-07 会话交接）
 
+## 2026-08-11：给 yesimbot LLM 注册正式语音工具 `use_voice`（进行中，待手测）
+
+**目标**：让米塔能正规地决定用语音说话（喊话/强调/应群友要求），而不是靠 prompt 标记/概率。
+
+- `registerChannelPlugin` 返回的 `AgentPlugin` 新增 `tools`：注册 `use_voice` 工具
+  - `execute` 给当前频道 `forceVoiceChannels` 打强制语音标记（复用 `.说话` 的 force-voice 截流通道，100% 走语音）
+- **用 `AgentPlugin.tools`（非简报建议的 `extendTools`）**：已验证 runtime 对两者都是 merge 语义、等价，`tools` 非废弃且官方推荐
+- 验证：typecheck / build（dist 含 use_voice）/ 65 测试全绿 ✅
+- **待手测**：部署后让群友 @mita「用语音工具给我发语音」→ 米塔调 use_voice → 本条回复转语音发出
+- **部署备忘**：AGENTS.md（NAS `/koishi/data/yesimbot/AGENTS.md` 的 7 工具使用方案）可加一行 `use_voice` 说明，强化米塔使用直觉（registry description 已自带，非必需）
+
 ## 项目
 
 - repo: `github.com/BakaAkari/ai-yesimbot-voice`（public）

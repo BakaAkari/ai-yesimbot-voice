@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.0] - 2026-08-11
+
+### 新增：给 yesimbot LLM 注册正式语音工具 `use_voice`（米塔可主动决定用语音说）
+
+**目标**：让米塔能「正规地」决定用语音说话，而不是靠 prompt 标记或概率。给 yesimbot LLM 注册一个真正的工具 `use_voice`，米塔想用语音（喊话/强调/应群友要求）时主动调用。
+
+- `registerChannelPlugin` 返回的 `AgentPlugin` 新增 `tools`，定义一个 `use_voice` 工具
+  - `execute` 只在当前频道的 `forceVoiceChannels` 打强制语音标记（复用 `.说话` 的 force-voice 截流通道，100% 走语音、不做概率/策略判定）
+  - 工具名/description 让 LLM 知道「何时用」：用户明确要求语音、或想用喊话/强调/有情绪的方式表达时
+- **实现选择**：用 `AgentPlugin.tools`（非废弃字段），而非简报建议的 `extendTools`
+  - 已在 `@yesimbot/agent-runtime` 源码验证：runtime 对 `tools`（`mergeTools([nextTools, declared])`）与 `extendTools` 都是 **merge 语义**，都会与基础工具（sendMessage/read 等）合并、**不会覆盖**，结果等价
+  - `extendTools` 在 d.ts/README 标记为 deprecated，官方推荐 `AgentPlugin.tools`（`tools: AgentToolSet | ((runtime) => ...)`）
+- 不影响 v0.5.0 已有的音色扫描 / `.voice` 切换 / 柯莱默认音色配置
+
+**验证**：typecheck ✅、`npm run build` ✅（dist 已含 `use_voice`）、65 项测试全绿 ✅。待本地/线上手测确认工具被米塔识别并触发语音。
+
 ## [0.5.0] - 2026-08-10
 
 ### 新增：设置页顶部说明 + 明确音色目录

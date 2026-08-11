@@ -410,6 +410,25 @@ export function apply(ctx: Context, config: Config) {
 
     const plugin: AgentPlugin = {
       name: 'aka-yesimbot-voice',
+      // 给 yesimbot LLM 注册正式语音工具：米塔想用语音「喊话/强调/应群友要求」时说出去时调用本工具，
+      // 而不是靠 prompt 标记或概率。execute 只给当前频道的 forceVoiceChannels 打强制语音标记，
+      // 复用 sendMessage patch 的 force-voice 截流通道（100% 走语音，不做策略判定）。
+      // 注：用 AgentPlugin.tools（非 deprecated 的 extendTools）。运行时对 tools 与 extendTools 都是
+      // merge 语义（mergeTools([nextTools, declared])），都会与基础工具(sendMessage/read 等)合并、不会覆盖；
+      // tools 是官方推荐字段（extendTools 为兼容保留）。
+      tools: [
+        {
+          name: 'use_voice',
+          description:
+            '把「本条回复」用语音（QQ 语音消息）说出而不是纯文本发送。适用场景：群友明确要求你用语音、或你想用「喊话/强调/有情绪」的方式表达某句话时。调用后本轮你的文本回复会被转成语音发出。平时不要用，仅在用户要求或你想强调语气时调用。',
+          parameters: { type: 'object', properties: {}, additionalProperties: false },
+          execute: async () => {
+            forceVoiceChannels.set(channelId, Date.now() + FORCE_VOICE_TTL)
+            logger.info('use_voice tool invoked channel=%s voice=%s', channelId, resolveCurrentVoice())
+            return '已设置：本条回复将用语音发送。'
+          },
+        },
+      ],
       // 记录本 turn 的 <message> 段，供 sendMessage patch 匹配（只吞 yesimbot 回复）
       async onAppend(entries) {
         if (!adv.replaceText) return

@@ -721,6 +721,24 @@ ${lines}
     }
     const plugin = {
       name: "aka-yesimbot-voice",
+      // 给 yesimbot LLM 注册正式语音工具：米塔想用语音「喊话/强调/应群友要求」时说出去时调用本工具，
+      // 而不是靠 prompt 标记或概率。execute 只给当前频道的 forceVoiceChannels 打强制语音标记，
+      // 复用 sendMessage patch 的 force-voice 截流通道（100% 走语音，不做策略判定）。
+      // 注：用 AgentPlugin.tools（非 deprecated 的 extendTools）。运行时对 tools 与 extendTools 都是
+      // merge 语义（mergeTools([nextTools, declared])），都会与基础工具(sendMessage/read 等)合并、不会覆盖；
+      // tools 是官方推荐字段（extendTools 为兼容保留）。
+      tools: [
+        {
+          name: "use_voice",
+          description: "\u628A\u300C\u672C\u6761\u56DE\u590D\u300D\u7528\u8BED\u97F3\uFF08QQ \u8BED\u97F3\u6D88\u606F\uFF09\u8BF4\u51FA\u800C\u4E0D\u662F\u7EAF\u6587\u672C\u53D1\u9001\u3002\u9002\u7528\u573A\u666F\uFF1A\u7FA4\u53CB\u660E\u786E\u8981\u6C42\u4F60\u7528\u8BED\u97F3\u3001\u6216\u4F60\u60F3\u7528\u300C\u558A\u8BDD/\u5F3A\u8C03/\u6709\u60C5\u7EEA\u300D\u7684\u65B9\u5F0F\u8868\u8FBE\u67D0\u53E5\u8BDD\u65F6\u3002\u8C03\u7528\u540E\u672C\u8F6E\u4F60\u7684\u6587\u672C\u56DE\u590D\u4F1A\u88AB\u8F6C\u6210\u8BED\u97F3\u53D1\u51FA\u3002\u5E73\u65F6\u4E0D\u8981\u7528\uFF0C\u4EC5\u5728\u7528\u6237\u8981\u6C42\u6216\u4F60\u60F3\u5F3A\u8C03\u8BED\u6C14\u65F6\u8C03\u7528\u3002",
+          parameters: { type: "object", properties: {}, additionalProperties: false },
+          execute: async () => {
+            forceVoiceChannels.set(channelId, Date.now() + FORCE_VOICE_TTL);
+            logger.info("use_voice tool invoked channel=%s voice=%s", channelId, resolveCurrentVoice());
+            return "\u5DF2\u8BBE\u7F6E\uFF1A\u672C\u6761\u56DE\u590D\u5C06\u7528\u8BED\u97F3\u53D1\u9001\u3002";
+          }
+        }
+      ],
       // 记录本 turn 的 <message> 段，供 sendMessage patch 匹配（只吞 yesimbot 回复）
       async onAppend(entries) {
         if (!adv.replaceText) return;
