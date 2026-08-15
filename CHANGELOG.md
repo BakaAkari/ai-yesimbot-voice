@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.6.1] - 2026-08-15
+
+### 修复：音色切换改为热重载即时生效（settings.json 动态真源）
+
+**背景**：在 Koishi 控制台改 `voice` 字段保存后，多次出现「生成了语音却仍是上一音色」。根因是 `resolveCurrentVoice()` 依赖「插件加载时读一次的内存变量 `savedVoiceOverride`」和「Koishi 保存配置是否会更新 `config` 对象引用」——两者都不可靠（容器长期不重启时，内存仍锁旧音色），导致必须完整重启才生效。
+
+**改动**：
+- `resolveCurrentVoice()` 改为**每次现读 `settings.json` 作为动态真源**（优先级最高），settings 不存在时回退 `config.voice`。彻底去掉对「Koishi 是否更新 config 引用」的内存依赖。
+- `.voice <name>` 命令移除内存缓存，只写 `settings.json`；现读逻辑每次自动取到最新值。
+
+**效果**：
+- `.voice <音色名>` → 立即生效，无需重启
+- 手动改 `settings.json` → 下次合成立即生效（每次现读）
+- 控制台改 `config.voice` → 无 settings 覆盖时生效
+
+**验证**：typecheck ✅ / 65 测试全绿 ✅ / build ✅；容器部署后启动日志 `registered (voice=leijun)` ✅，模型网关正常无 `route_failed` ✅。
+
 ## [0.6.0] - 2026-08-11
 
 ### 新增：给 yesimbot LLM 注册正式语音工具 `use_voice`（米塔可主动决定用语音说）

@@ -123,11 +123,12 @@ export function apply(ctx: Context, config: Config) {
     }
   }
   // 当前音色：每次动态解析（settings 优先，否则 config.voice）。
-  // 这样控制台改 voice 字段无需重启即时生效；.voice 命令写 settings 也即时覆盖。
-  // 注意：Koishi 会在配置保存时更新传入的 config 对象引用，因此读 config.voice 始终取到最新值。
-  let savedVoiceOverride = readSavedVoice()
+  // settings.json 是动态真源：每次现读磁盘，跨进程/重启/冷却期都取最新值，
+  // 不依赖「Koishi 保存配置是否更新 config 引用」这一不确定行为。
+  // .voice <name> 命令写 settings（即时生效），控制台改 config.voice 作为无 settings 时的默认。
   function resolveCurrentVoice(): string {
-    if (savedVoiceOverride) return savedVoiceOverride
+    const saved = readSavedVoice()
+    if (saved) return saved
     return config.voice || 'auto'
   }
 
@@ -330,7 +331,7 @@ export function apply(ctx: Context, config: Config) {
       const list = voices.scan()
       const found = list.find((v) => v.name === name)
       if (!found) return `没有音色「${name}」。用 .voice 查看可用列表。`
-      savedVoiceOverride = name
+      // 写 settings.json 即即时生效：resolveCurrentVoice 每次现读磁盘，无需内存缓存
       saveVoice(name)
       logger.info('voice switched to %s by user', name)
       return `✅ 已切换到音色「${name}」（已保存，重启不丢）。`

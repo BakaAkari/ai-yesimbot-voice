@@ -479,9 +479,9 @@ function apply(ctx, config) {
       logger.warn("save voice settings failed: %s", err instanceof Error ? err.message : String(err));
     }
   }
-  let savedVoiceOverride = readSavedVoice();
   function resolveCurrentVoice() {
-    if (savedVoiceOverride) return savedVoiceOverride;
+    const saved = readSavedVoice();
+    if (saved) return saved;
     return config.voice || "auto";
   }
   const registerVoiceOptions = () => {
@@ -654,7 +654,6 @@ ${lines}
     const list = voices.scan();
     const found = list.find((v) => v.name === name2);
     if (!found) return `\u6CA1\u6709\u97F3\u8272\u300C${name2}\u300D\u3002\u7528 .voice \u67E5\u770B\u53EF\u7528\u5217\u8868\u3002`;
-    savedVoiceOverride = name2;
     saveVoice(name2);
     logger.info("voice switched to %s by user", name2);
     return `\u2705 \u5DF2\u5207\u6362\u5230\u97F3\u8272\u300C${name2}\u300D\uFF08\u5DF2\u4FDD\u5B58\uFF0C\u91CD\u542F\u4E0D\u4E22\uFF09\u3002`;
