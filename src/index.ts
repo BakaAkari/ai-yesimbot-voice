@@ -313,22 +313,17 @@ export function apply(ctx: Context, config: Config) {
       .filter(Boolean)
   }
 
-  // —— .voice 指令：管理员列/切换音色 ——
-  ctx.command('voice', '语音设置：查看 / 切换当前音色')
-    .action(async ({ session }) => {
-      if (!session) return '需要会话上下文。'
-      const list = voices.scan()
-      const current = voices.resolve(resolveCurrentVoice())
-      if (!list.length) return '音色目录为空：往 voiceDir 放入 *.wav（重启生效）。'
-      const lines = list.map((v) => `${v.name === current?.name ? '● ' : '○ '}${v.name}`).join('\n')
-      return `当前音色：${current?.name ?? '（无）'}\n可用音色：\n${lines}\n\n用 .voice <音色名> 切换`
-    })
-
-  ctx.command('voice <name>', '切换到指定音色')
+  // —— .voice 指令：管理员列/切换音色（单命令，可选参数 [name]；.voice 查看 / .voice <name> 切换） ——
+  ctx.command('voice [name]', '语音设置：.voice 查看当前/全部音色；.voice <音色名> 切换')
     .action(async ({ session }, name) => {
       if (!session) return '需要会话上下文。'
-      if (!name) return '用法：.voice <音色名>（先 .voice 查看可用列表）'
       const list = voices.scan()
+      if (!name) {
+        const current = voices.resolve(resolveCurrentVoice())
+        if (!list.length) return '音色目录为空：往 voiceDir 放入 *.wav（重启生效）。'
+        const lines = list.map((v) => `${v.name === current?.name ? '● ' : '○ '}${v.name}`).join('\n')
+        return `当前音色：${current?.name ?? '（无）'}\n可用音色：\n${lines}\n\n用 .voice <音色名> 切换`
+      }
       const found = list.find((v) => v.name === name)
       if (!found) return `没有音色「${name}」。用 .voice 查看可用列表。`
       // 写 settings.json 即即时生效：resolveCurrentVoice 每次现读磁盘，无需内存缓存

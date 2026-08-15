@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.2] - 2026-08-15
+
+### 修复：`.voice <音色名>` 切换命令失效（单命令 `voice [name]`）
+
+**背景**：`.voice <音色名>` 无法切换音色——在群里发 `.voice mabaoguo` 只会打印音色列表，从不执行切换（`voice switched` 日志从未出现，settings.json 一直不变）。
+
+**根因**：代码里注册了**两个独立命令** `ctx.command('voice')` 和 `ctx.command('voice <name>')`。Koishi 把它们当两个命令，`.voice mabaoguo` 被匹配到**无参 `voice` 命令**，参数 `mabaoguo` 被吞掉，因此只走「查看列表」分支，永不触发切换。
+
+**改动**：合并为**单个命令** `ctx.command('voice [name]')`，在一个 action 内用可选参数分支：
+- `.voice` → 查看当前/全部音色
+- `.voice <音色名>` → 切换（写 settings.json 即时生效）
+
+**验证**：typecheck ✅ / 65 测试全绿 ✅ / build ✅；容器部署重启后插件注册正常无报错。
+
 ## [0.6.1] - 2026-08-15
 
 ### 修复：音色切换改为热重载即时生效（settings.json 动态真源）

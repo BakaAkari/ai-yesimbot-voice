@@ -636,22 +636,19 @@ function apply(ctx, config) {
     if (!text) return [];
     return text.split(/<message\s*\/?\s*>/).map((s) => s.replace(/<\/message>/g, "").trim()).filter(Boolean);
   }
-  ctx.command("voice", "\u8BED\u97F3\u8BBE\u7F6E\uFF1A\u67E5\u770B / \u5207\u6362\u5F53\u524D\u97F3\u8272").action(async ({ session }) => {
+  ctx.command("voice [name]", "\u8BED\u97F3\u8BBE\u7F6E\uFF1A.voice \u67E5\u770B\u5F53\u524D/\u5168\u90E8\u97F3\u8272\uFF1B.voice <\u97F3\u8272\u540D> \u5207\u6362").action(async ({ session }, name2) => {
     if (!session) return "\u9700\u8981\u4F1A\u8BDD\u4E0A\u4E0B\u6587\u3002";
     const list = voices.scan();
-    const current = voices.resolve(resolveCurrentVoice());
-    if (!list.length) return "\u97F3\u8272\u76EE\u5F55\u4E3A\u7A7A\uFF1A\u5F80 voiceDir \u653E\u5165 *.wav\uFF08\u91CD\u542F\u751F\u6548\uFF09\u3002";
-    const lines = list.map((v) => `${v.name === current?.name ? "\u25CF " : "\u25CB "}${v.name}`).join("\n");
-    return `\u5F53\u524D\u97F3\u8272\uFF1A${current?.name ?? "\uFF08\u65E0\uFF09"}
+    if (!name2) {
+      const current = voices.resolve(resolveCurrentVoice());
+      if (!list.length) return "\u97F3\u8272\u76EE\u5F55\u4E3A\u7A7A\uFF1A\u5F80 voiceDir \u653E\u5165 *.wav\uFF08\u91CD\u542F\u751F\u6548\uFF09\u3002";
+      const lines = list.map((v) => `${v.name === current?.name ? "\u25CF " : "\u25CB "}${v.name}`).join("\n");
+      return `\u5F53\u524D\u97F3\u8272\uFF1A${current?.name ?? "\uFF08\u65E0\uFF09"}
 \u53EF\u7528\u97F3\u8272\uFF1A
 ${lines}
 
 \u7528 .voice <\u97F3\u8272\u540D> \u5207\u6362`;
-  });
-  ctx.command("voice <name>", "\u5207\u6362\u5230\u6307\u5B9A\u97F3\u8272").action(async ({ session }, name2) => {
-    if (!session) return "\u9700\u8981\u4F1A\u8BDD\u4E0A\u4E0B\u6587\u3002";
-    if (!name2) return "\u7528\u6CD5\uFF1A.voice <\u97F3\u8272\u540D>\uFF08\u5148 .voice \u67E5\u770B\u53EF\u7528\u5217\u8868\uFF09";
-    const list = voices.scan();
+    }
     const found = list.find((v) => v.name === name2);
     if (!found) return `\u6CA1\u6709\u97F3\u8272\u300C${name2}\u300D\u3002\u7528 .voice \u67E5\u770B\u53EF\u7528\u5217\u8868\u3002`;
     saveVoice(name2);
