@@ -66,7 +66,7 @@ export interface Config {
 
 export const Config: Schema<Config> = Schema.object({
   hint: Schema.object({}).description(
-    '把这个 Bot 的回复转成语音发到 QQ 群。\n音色目录：data/aka-yesimbot-voice/voices（可在下方 voiceDir 修改）。\n放入 <音色名>.wav 和同名 <音色名>.txt（txt = 该 wav 参考音频的真实转写）即新增音色，重启后自动可用。\n当前音色的唯一真源是 data/aka-yesimbot-voice/settings.json：用 .voice 命令切换（.voice 查看列表 / .voice <音色名> 切换），不通过本配置页设置。',
+    '把 bot 的回复转成语音发到 QQ 群。\n\n■ 音色文件\n音色目录：data/aka-yesimbot-voice/voices（下方 voiceDir）\n每个音色 = <音色名>.wav（参考音频）+ 同名 <音色名>.txt（该音频的真实转写）\n放入即新增，重启后自动可用。\n\n■ 当前音色\n唯一真源 = data/aka-yesimbot-voice/settings.json\n用 .voice 命令切换：.voice 查看列表，.voice <音色名> 切换\n本配置页不设置音色。',
   ),
   probability: Schema.number().min(0).max(1).default(1.0).description('每条回复配语音概率'),
   llm: Schema.boolean().default(true).description('LLM 语音效果渲染（走 yesimbot 主模型；失败自动降级规则层）'),
