@@ -189,24 +189,33 @@ export function apply(ctx: Context, config: Config) {
     onMentionOnly: adv.onMentionOnly,
   }
 
-  // 每个 channel 独立冷却
-  const lastSpeakAt = new Map<string, number>()
-
   // —— replaceText 模式 ——
-  // 待发语音队列（channelId -> 文本），消费防抖 600ms，turn 结束时立即消费
-  const pendingVoice = new Map<string, { text: string; timer: ReturnType<typeof setTimeout>; consumed: boolean }>()
-  // 每个 channel 最近 turn 的 <message> 段（onAppend 记录，patch 匹配用）
-  // 只吞"发送文本 == 某 turn 回复段"的调用 → 指令返回/其他插件发送永不吞
-  const turnSegments = new Map<string, string[]>()
-  // 手动触发的一次性语音标记：.说话 指令给 channel 打标（带 TTL），下一次回复强制走语音，消费后清除
-  // Map<channelId, 过期时间戳>；TTL 120s，避免命令后无回复导致标记残留
-  const forceVoiceChannels = new Map<string, number>()
   const FORCE_VOICE_TTL = 120_000
-  function isForceArmed(channelId: string): boolean {
-    const exp = forceVoiceChannels.get(channelId)
+  // 运行时语音状态统一挂到 bot 对象上，与插件 apply() 实例生命周期解耦。
+  // 背景：热重载会新建 apply() 与它捕获的闭包，但 bot 对象不重建、且 _akaVoicePatched
+  // 阻止了重新 patch。若状态留在 apply() 里，重载后 sendMessage patch（旧实例闭包）读的是旧
+  // map，而新实例的 use_voice/onAppend 写新 map，二者永远脱节 → force-voice / 吞文本静默失效、
+  // 回复以纯文本漏发。挂到 bot 上让所有实例读写同一份状态。
+  interface VoiceRuntimeState {
+    pendingVoice: Map<string, { text: string; timer: ReturnType<typeof setTimeout>; consumed: boolean }>
+    turnSegments: Map<string, string[]>
+    forceVoiceChannels: Map<string, number>
+    lastSpeakAt: Map<string, number>
+  }
+  function voiceState(bot: Bot): VoiceRuntimeState {
+    const b = bot as unknown as { _akaVoiceState?: VoiceRuntimeState }
+    return (b._akaVoiceState ??= {
+      pendingVoice: new Map(),
+      turnSegments: new Map(),
+      forceVoiceChannels: new Map(),
+      lastSpeakAt: new Map(),
+    })
+  }
+  function isForceArmed(st: VoiceRuntimeState, channelId: string): boolean {
+    const exp = st.forceVoiceChannels.get(channelId)
     if (exp === undefined) return false
     if (Date.now() > exp) {
-      forceVoiceChannels.delete(channelId)
+      st.forceVoiceChannels.delete(channelId)
       return false
     }
     return true
@@ -228,11 +237,12 @@ export function apply(ctx: Context, config: Config) {
   }
 
   function consumePending(channelId: string, bot: Bot, platform: string): void {
-    const item = pendingVoice.get(channelId)
+    const st = voiceState(bot)
+    const item = st.pendingVoice.get(channelId)
     if (!item || item.consumed) return
     item.consumed = true
     if (item.timer) clearTimeout(item.timer)
-    pendingVoice.delete(channelId)
+    st.pendingVoice.delete(channelId)
     const text = item.text
     void (async () => {
       try {
@@ -240,7 +250,7 @@ export function apply(ctx: Context, config: Config) {
         const voice = currentVoice()
         const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, voice ?? undefined)
         await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl)
-        lastSpeakAt.set(channelId, Date.now())
+        st.lastSpeakAt.set(channelId, Date.now())
         logger.info(
           'voice sent (text replaced) channel=%s voice=%s path=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s rendered=%s',
           channelId, voice?.name ?? 'none', voice?.path ?? '', out.pcmBytes, out.durationMs, rendered.source,
@@ -261,7 +271,8 @@ export function apply(ctx: Context, config: Config) {
   }
 
   function queuePending(bot: Bot, channelId: string, platform: string, text: string): void {
-    const existing = pendingVoice.get(channelId)
+    const st = voiceState(bot)
+    const existing = st.pendingVoice.get(channelId)
     if (existing && !existing.consumed) {
       // 同 turn 多段：合并文本，重置防抖
       existing.text = existing.text.length > text.length ? existing.text : text
@@ -270,7 +281,7 @@ export function apply(ctx: Context, config: Config) {
       return
     }
     const timer = setTimeout(() => consumePending(channelId, bot, platform), 600)
-    pendingVoice.set(channelId, { text, timer, consumed: false })
+    st.pendingVoice.set(channelId, { text, timer, consumed: false })
   }
 
   // 从 sendMessage 的 content 里提取纯文本（h 元素数组 / 字符串）
@@ -340,7 +351,8 @@ export function apply(ctx: Context, config: Config) {
       if (!cid) return '无法确定会话频道。'
       // 延迟 300ms 再武装：让本命令返回的"🔊 收到"文本先正常发出（不走语音）
       setTimeout(() => {
-        forceVoiceChannels.set(cid, Date.now() + FORCE_VOICE_TTL)
+        if (!session.bot) return
+        voiceState(session.bot).forceVoiceChannels.set(cid, Date.now() + FORCE_VOICE_TTL)
         logger.info('.说话 force-voice armed channel=%s (voice=%s)', cid, resolveCurrentVoice())
       }, 300)
       return '🔊 收到，下一句我用语音回你。'
@@ -366,13 +378,14 @@ export function apply(ctx: Context, config: Config) {
       bot.sendMessage = (async (cid: string, content: unknown, ...rest: unknown[]) => {
         const text = extractSendText(content)
         const cidStr = String(cid)
-        if (text && isShared && !pendingVoice.has(cidStr)) {
-          const segments = turnSegments.get(cidStr) ?? []
+        const st = voiceState(bot)
+        if (text && isShared && !st.pendingVoice.has(cidStr)) {
+          const segments = st.turnSegments.get(cidStr) ?? []
           const isTurnReply = segments.includes(text)
-          const forced = isForceArmed(cidStr) // 校验且在有效期
+          const forced = isForceArmed(st, cidStr) // 校验且在有效期
           // force-voice 优先：.说话 后本群下一条 bot 发送即强制语音（不依赖 isTurnReply）
           if (forced) {
-            forceVoiceChannels.delete(cidStr) // 一次性消费
+            st.forceVoiceChannels.delete(cidStr) // 一次性消费
             logger.info('text replaced by voice (forced) channel=%s reason=force-voice text=%s', cidStr, text.slice(0, 30))
             queuePending(bot, cidStr, platform, text)
             return []
@@ -384,7 +397,7 @@ export function apply(ctx: Context, config: Config) {
               isShared,
               mentioned: false,
               now: Date.now(),
-              lastSpeakAt: lastSpeakAt.get(cidStr) ?? 0,
+              lastSpeakAt: st.lastSpeakAt.get(cidStr) ?? 0,
             })
             if (decision.speak) {
               logger.info('text replaced by voice channel=%s reason=%s text=%s', cidStr, decision.reason, text.slice(0, 30))
@@ -394,7 +407,7 @@ export function apply(ctx: Context, config: Config) {
             logger.info('text kept (voice skip) channel=%s reason=%s text=%s', cidStr, decision.reason, text.slice(0, 30))
           }
           // 非 turn 回复（指令等）→ 原样发送
-        } else if (text && pendingVoice.has(cidStr)) {
+        } else if (text && st.pendingVoice.has(cidStr)) {
           // 同 turn 后续段落：并入语音文本，继续吞
           queuePending(bot, cidStr, platform, text)
           return []
@@ -419,7 +432,7 @@ export function apply(ctx: Context, config: Config) {
             '把「本条回复」用语音（QQ 语音消息）说出而不是纯文本发送。适用场景：群友明确要求你用语音、或你想用「喊话/强调/有情绪」的方式表达某句话时。调用后本轮你的文本回复会被转成语音发出。平时不要用，仅在用户要求或你想强调语气时调用。',
           parameters: { type: 'object', properties: {}, additionalProperties: false },
           execute: async () => {
-            forceVoiceChannels.set(channelId, Date.now() + FORCE_VOICE_TTL)
+            voiceState(bot).forceVoiceChannels.set(channelId, Date.now() + FORCE_VOICE_TTL)
             logger.info('use_voice tool invoked channel=%s voice=%s', channelId, resolveCurrentVoice())
             return '已设置：本条回复将用语音发送。'
           },
@@ -434,16 +447,17 @@ export function apply(ctx: Context, config: Config) {
           if (data?.role !== 'assistant') continue
           const segments = extractTurnSegments(data.content)
           if (segments.length > 0) {
-            turnSegments.set(channelId, segments)
+            voiceState(bot).turnSegments.set(channelId, segments)
           }
         }
       },
       // replaceText 模式：turn 结束立即消费；否则在 turn 结束按策略附带语音
       async onTurnFinish(result: TurnResult) {
+        const st = voiceState(bot)
         if (adv.replaceText) {
           // 不删 turnSegments：让 sendMessage patch 在消费语音时能读到段去匹配。
           // （旧实现这里 delete 导致 sendMessage 读 isTurnReply 永远 false，语音永不触发）
-          const item = pendingVoice.get(channelId)
+          const item = st.pendingVoice.get(channelId)
           if (item && !item.consumed) {
             consumePending(channelId, bot, platform)
           }
@@ -460,7 +474,7 @@ export function apply(ctx: Context, config: Config) {
           isShared,
           mentioned: false,
           now,
-          lastSpeakAt: lastSpeakAt.get(channelId) ?? 0,
+          lastSpeakAt: st.lastSpeakAt.get(channelId) ?? 0,
         })
         if (!decision.speak) {
           logger.info('skip voice channel=%s reason=%s text=%s', channelId, decision.reason, text.slice(0, 30))
@@ -473,7 +487,7 @@ export function apply(ctx: Context, config: Config) {
             const voice = currentVoice()
             const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, voice ?? undefined)
             await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl)
-            lastSpeakAt.set(channelId, Date.now())
+            st.lastSpeakAt.set(channelId, Date.now())
             logger.info(
               'voice sent channel=%s voice=%s path=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s wav=%s',
               channelId, voice?.name ?? 'none', voice?.path ?? '', out.pcmBytes, out.durationMs, rendered.source,

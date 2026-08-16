@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.3] - 2026-08-16
+
+### 修复：语音链路在插件热重载后失效（use_voice / 吞文本静默失效，只发文字）
+
+**现象**：热重载（如 market 更新插件 / 控制台改配置触发 apply）后，`use_voice` 工具被调用（日志有 `use_voice tool invoked`），但回复只发出纯文本、不再转语音——`text replaced by voice (forced)` 与 `voice sent` 日志完全消失。
+
+**根因**：`pendingVoice / turnSegments / forceVoiceChannels / lastSpeakAt` 四个运行时状态 Map 声明在 `apply()` 内，生命周期绑定**插件实例**闭包。但 sendMessage patch 用 `bot._akaVoicePatched` 布尔值保证每个 bot **只 patch 一次**——热重载会新建一个 `apply()` 实例（新闭包新 Map），而 bot 对象与它已挂载的旧 patch 不重建。于是：
+- 投递仍走**旧实例**闭包里的 patch，读的是**旧 Map**；
+- 新实例的 `use_voice` / `.说话` / `onAppend` 写的是**新 Map**；
+- 两边永远脱节 → `isForceArmed` / `isTurnReply` 恒 false → 回复以纯文本漏发，语音永不触发。
+
+**改动**：把四个运行时状态统一挂到 **bot 对象**（`bot._akaVoiceState`，懒创建）上，与插件实例生命周期解耦。`sendMessage` patch、`use_voice` 工具、`.说话` 命令、`onAppend`、`onTurnFinish`、`consumePending`/`queuePending`/`isForceArmed` 全部改从 `voiceState(bot)` 读写同一份状态。热重载后新旧实例共享同一 bot 状态，不再漂移。
+
+**验证**：typecheck ✅（发布时 prepublishOnly 自动 clean+build dist）。
+**手测入口**：部署后在测试群 @米塔「用语音工具给我发语音」→ 应看到 `text replaced by voice (forced)` + `voice sent`，群内收到语音、不再只有文字。
+
 ## [0.6.2] - 2026-08-15
 
 ### 修复：`.voice <音色名>` 切换命令失效（单命令 `voice [name]`）
