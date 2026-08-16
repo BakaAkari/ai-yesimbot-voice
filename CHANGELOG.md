@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.6.4] - 2026-08-16
+
+### 方案C：当前音色统一以 settings.json 为唯一真源（移除 Config.voice 双真源）
+
+**背景**：音色存在两处各存一份——`settings.json`（`.voice` 命令写、合成读）与 Koishi 配置页的 `config.voice`（koishi.yml 里的 `voice:`）。两者只同步一半：聊天里 `.voice` 切音色，配置页永不更新，形成误导性的双真源。
+
+**改动**：
+- 从插件 `Config` schema **移除 `voice` 字段** → 控制台设置页不再有音色下拉（杜绝「改了配置页却与 settings 不同步」的错觉）。
+- `resolveCurrentVoice()` 删掉对 `config.voice` 的回退，**只读 settings.json**；无 settings 时回退 `'auto'`（音色目录第一个）。
+- 移除 30s 轮询的音色动态下拉注册（`yesimbot-voice.voices` dynamic source）——已无字段引用。
+- 音色切换唯一入口 = `.voice` 命令（写 settings.json，即时生效，重启不丢）。
+
+**行为**：音频音色真源从两个收敛为一个。`settings.json` 缺失/损坏时回退目录第一个音色（auto），行为同旧默认。
+
+**注意**：老配置 koishi.yml 里若残留 `voice: <name>`，字段已从 schema 移除会自然被忽略；NAS 部署时建议顺手删掉该残留行（可选清理）。
+
+**验证**：typecheck ✅（发布时 prepublishOnly 自动 clean+build dist）。
+**手测入口**：部署后 `.voice` 查看/切换正常；控制台设置页不再显示音色下拉；`.voice mabaoguo` 后合成即用新音色（settings.json 唯一来源）。
+
 ## [0.6.3] - 2026-08-16
 
 ### 修复：语音链路在插件热重载后失效（use_voice / 吞文本静默失效，只发文字）

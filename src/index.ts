@@ -35,8 +35,6 @@ export const inject = ['yesimbot']
 export interface Config {
   /** 设置页顶部说明（纯信息，不参与运行业务） */
   hint: object
-  /** 音色名；'auto' = 音色目录按字母序第一个 */
-  voice: string
   /** 每条回复配语音概率 0-1 */
   probability: number
   /** LLM 语音效果渲染（走 yesimbot 主模型通道；失败自动降级规则层） */
@@ -68,11 +66,8 @@ export interface Config {
 
 export const Config: Schema<Config> = Schema.object({
   hint: Schema.object({}).description(
-    '把这个 Bot 的回复转成语音发到 QQ 群。\n音色目录：data/aka-yesimbot-voice/voices（可在下方 voiceDir 修改）。\n放入 <音色名>.wav 和同名 <音色名>.txt（txt = 该 wav 参考音频的真实转写）即新增音色，重启后自动出现在下方 voice 下拉。',
+    '把这个 Bot 的回复转成语音发到 QQ 群。\n音色目录：data/aka-yesimbot-voice/voices（可在下方 voiceDir 修改）。\n放入 <音色名>.wav 和同名 <音色名>.txt（txt = 该 wav 参考音频的真实转写）即新增音色，重启后自动可用。\n当前音色的唯一真源是 data/aka-yesimbot-voice/settings.json：用 .voice 命令切换（.voice 查看列表 / .voice <音色名> 切换），不通过本配置页设置。',
   ),
-  voice: Schema.dynamic('yesimbot-voice.voices')
-    .default('auto')
-    .description('当前音色：auto=音色目录第一个；下拉选择或搜索音色名'),
   probability: Schema.number().min(0).max(1).default(1.0).description('每条回复配语音概率'),
   llm: Schema.boolean().default(true).description('LLM 语音效果渲染（走 yesimbot 主模型；失败自动降级规则层）'),
   voiceDir: Schema.string().default('data/aka-yesimbot-voice/voices').description('音色源目录：往里放/删 *.wav 即增删音色（重启生效）'),
@@ -103,7 +98,7 @@ export function apply(ctx: Context, config: Config) {
   const outputDir = outputDirOf(absVoiceDir)
   const voices = new VoiceLibrary(absVoiceDir)
 
-  // 当前音色持久化（settings.json，重启不丢）。优先级：settings 覆盖 config.voice。
+  // 当前音色持久化（settings.json 唯一真源，重启不丢）
   const settingsPath = join(dirname(absVoiceDir), 'settings.json')
   function readSavedVoice(): string | undefined {
     try {
@@ -122,42 +117,14 @@ export function apply(ctx: Context, config: Config) {
       logger.warn('save voice settings failed: %s', err instanceof Error ? err.message : String(err))
     }
   }
-  // 当前音色：每次动态解析（settings 优先，否则 config.voice）。
-  // settings.json 是动态真源：每次现读磁盘，跨进程/重启/冷却期都取最新值，
-  // 不依赖「Koishi 保存配置是否更新 config 引用」这一不确定行为。
-  // .voice <name> 命令写 settings（即时生效），控制台改 config.voice 作为无 settings 时的默认。
+  // 当前音色唯一真源 = settings.json（每次现读磁盘）。
+  // 移除 config.voice 后不再有「配置页 vs settings」双真源：.voice 命令写 settings，
+  // 合成每次从 settings.json 取最新；无 settings 时回退 'auto'（音色目录第一个）。
   function resolveCurrentVoice(): string {
     const saved = readSavedVoice()
     if (saved) return saved
-    return config.voice || 'auto'
+    return 'auto'
   }
-
-  // —— 动态音色下拉：ctx.schema.set 注册可搜索的 union 选项源（机制同 chatluna / ai-image-generator）
-  // 支持控制台 voice 字段下拉/搜索；目录变化时重建即可实时更新。
-  const registerVoiceOptions = () => {
-    const list = voices.scan()
-    if (!(ctx as any).schema) {
-      logger.warn('voice schema: ctx.schema service unavailable')
-      return
-    }
-    try {
-      const options = [
-        Schema.const('auto').description('auto（音色目录第一个）'),
-        ...list.map((v) => Schema.const(v.name).description(v.name)),
-      ]
-      ;(ctx as any).schema.set('yesimbot-voice.voices', Schema.union(options))
-      logger.info('voice schema dynamic source registered: yesimbot-voice.voices (%d options)', list.length + 1)
-    } catch (err) {
-      logger.warn('voice schema dynamic source register failed: %s', err instanceof Error ? err.message : String(err))
-    }
-  }
-  registerVoiceOptions()
-
-  // 定时重建音色选项（放/删 wav 后自动更新下拉，无需重启）
-  const rescanTimer = setInterval(() => {
-    registerVoiceOptions()
-  }, 30_000)
-  ctx.on('dispose', () => clearInterval(rescanTimer))
 
   // 语音效果渲染通道（llm=false → 只跑规则层；yesimbot 通道构建失败自动降级规则层）
   let llmChannel: LlmChannel | null = null
@@ -229,7 +196,7 @@ export function apply(ctx: Context, config: Config) {
     // 具名音色请求却解析到别的音色（通常=排序第一即 halo_marine）→ 必是配置/扫描异常，显式告警，不再静默
     if (requested && requested !== 'auto' && requested !== resolved) {
       logger.warn(
-        'voice resolve MISMATCH: requested=%s resolved=%s (fallback) — check config.voice / settings.json / voiceDir files',
+        'voice resolve MISMATCH: requested=%s resolved=%s (fallback) — check settings.json / voiceDir files',
         requested, resolved,
       )
     }
