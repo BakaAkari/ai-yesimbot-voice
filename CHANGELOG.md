@@ -1,5 +1,36 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.7.0] - 2026-08-28
+
+### 特性：对齐 CV3 生成流程（适配 CV3 音源库元数据 + persona 注入 + 语速 + 响度归一化）
+
+> 评审后实施（不切 instruct2：服务端 `/inference_instruct2` 实为 `/inference_zero_shot` 的别名，切换无益且会复现对齐劣化）。
+
+**改动**：
+- **读 CV3 完整音源元数据**：`VoiceLibrary` 支持双格式——扁平 `<name>.wav`（+ 可选 `<name>.txt` / `<name>.meta.json` / `<name>.prompt_template.json`）或 CV3 子目录 `<name>/ref.wav`（+ `ref_transcript.txt` / `meta.json` / `prompt_template.json`）。读取 meta 与 prompt_template 到 `VoiceInfo`，并从 prompt_template 派生 `stylePrompt`。
+- **persona 注入 LLM 改写层**：`renderVoice` 按当前音色把 `stylePrompt`（persona / 节奏 / 写作引导）拼进 LLM 改写 prompt（`composeVoicePrompt`），让语音导演知道是哪个音色在说话；无则退回基础 prompt。不改原意字面内容，沿用 fidelityRatio 保真闸门。
+- **语速**：新增 `advanced.ttsSpeed`（默认 1.2，对齐 CV3 规范），`TtsClient` 的 `/inference_zero_shot` 请求带 `speed` 字段（原为不发、服务端默认 1.0）。
+- **响度归一化**：新增 `advanced.loudnorm`（默认 true），合成后调服务端 `/loudnorm`（-20 LUFS / TP -2 / LRA 11）归一化；端点不可用/失败静默降级返回原 PCM，`TtsSynthesisResult.loudnormApplied` 标记实际是否生效，日志打印。
+
+**配套（服务端，可加性）**：`ai-cosyvoice3` 的 `server_cosyvoice3.py` 新增只读端点 `POST /loudnorm`（24kHz mono s16 裸 PCM → 归一化后同格式），供本插件及外部调用方复用 CV3 的 -20 LUFS 基准。⚠️ 该改动需**重启 `ai-cosyvoice3` 容器**才生效；未重启前插件自动降级不阻断。
+
+**验证**：typecheck ✅ + vitest 70 用例全过（新增 speed / loudnorm 生效 / loudnorm 降级用例）✅ + `pnpm build` ✅。服务端 ffmpeg loudnorm 已在容器内实测（显式 `-ar 24000 -ac 1`，输出尺寸/采样率正确）。
+
+### 修复：QQ 语音末尾字被截断（Silk 帧编码吞掉末音节）
+
+**现象**：生成的语音消息播放时，末尾 1-2 个字有概率被截断。
+
+**根因**：CosyVoice3 在 stop token 处硬切、合成的 WAV 末尾无静音余量；QQ 语音经 Silk/AMR 20ms 帧编码,末尾无静音缓冲帧时最后一帧语音被吞,导致末尾音节/字被截断。
+
+**改动**：
+- `wrapWav(pcm, tailPadMs)` 新增尾部静音填充参数(默认 0 保持原行为)。
+- `TtsClientConfig` 新增 `tailPadMs`,TtsClient 合成后按此在 WAV 末尾追加静音缓冲。
+- 配置项 `advanced.ttsTailPadMs`(默认 400ms,范围 0-2000,0=不填充),在设置页高级里可调。
+
+**验证**：typecheck ✅ + vitest 新增 tail-pad 用例 ✅。
+
 ## [0.6.5] - 2026-08-16
 
 ### 文档与设置页文案：补全 TTS 系统部署 + 音色风格文件设计指南

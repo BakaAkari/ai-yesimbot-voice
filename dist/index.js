@@ -61,6 +61,7 @@ ${value}\r
     };
     pushField("tts_text", text);
     pushField("prompt_text", promptText);
+    pushField("speed", String(this.config.speed ?? 1.2));
     if (voice?.path) {
       const fs2 = await import("fs");
       const audio = await fs2.promises.readFile(voice.path);
@@ -91,24 +92,59 @@ Content-Type: audio/wav\r
       const detail = await response.text().catch(() => "");
       throw new Error(`TTS HTTP ${response.status}: ${detail.slice(0, 200)}`);
     }
-    const pcm = Buffer.from(await response.arrayBuffer());
+    let pcm = Buffer.from(await response.arrayBuffer());
     if (pcm.length < WAV_HEADER_SIZE) throw new Error(`TTS empty audio (${pcm.length} bytes)`);
+    let loudnormApplied = false;
+    if (this.config.loudnorm) {
+      const ln = await this.applyLoudnorm(pcm);
+      pcm = ln.pcm;
+      loudnormApplied = ln.applied;
+    }
     const { mkdir } = await import("fs/promises");
     const { join: join3 } = await import("path");
     await mkdir(outDir, { recursive: true });
     const wavPath = join3(outDir, outName);
     const fs = await import("fs");
-    await fs.promises.writeFile(wavPath, wrapWav(pcm));
-    return { wavPath, durationMs: Date.now() - startedAt, pcmBytes: pcm.length };
+    await fs.promises.writeFile(wavPath, wrapWav(pcm, this.config.tailPadMs));
+    return { wavPath, durationMs: Date.now() - startedAt, pcmBytes: pcm.length, loudnormApplied };
+  }
+  /**
+   * 调服务端 /loudnorm，把 24kHz mono s16 PCM 归一化到 -20 LUFS。
+   * 失败（网络/非 2xx/返回过小）返回 { pcm: 原样, applied: false }，绝不抛错。
+   */
+  async applyLoudnorm(pcm) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
+    try {
+      const res = await this.fetchLike(`${this.config.apiBase.replace(/\/+$/, "")}/loudnorm`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(pcm.length)
+        },
+        body: new Uint8Array(pcm),
+        signal: controller.signal
+      });
+      if (!res.ok) return { pcm, applied: false };
+      const out = Buffer.from(await res.arrayBuffer());
+      if (out.length < WAV_HEADER_SIZE) return { pcm, applied: false };
+      return { pcm: out, applied: true };
+    } catch {
+      return { pcm, applied: false };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 };
-function wrapWav(pcm) {
+function wrapWav(pcm, tailPadMs = 0) {
   const sampleRate = 24e3;
   const channels = 1;
   const bitsPerSample = 16;
   const byteRate = sampleRate * channels * bitsPerSample / 8;
   const blockAlign = channels * bitsPerSample / 8;
-  const dataSize = pcm.length;
+  const tailPadSamples = Math.max(0, Math.round(tailPadMs / 1e3 * sampleRate));
+  const tailPadBytes = tailPadSamples * channels * bitsPerSample / 8;
+  const dataSize = pcm.length + tailPadBytes;
   const header = Buffer.alloc(WAV_HEADER_SIZE);
   header.write("RIFF", 0);
   header.writeUInt32LE(36 + dataSize, 4);
@@ -123,7 +159,8 @@ function wrapWav(pcm) {
   header.writeUInt16LE(bitsPerSample, 34);
   header.write("data", 36);
   header.writeUInt32LE(dataSize, 40);
-  return Buffer.concat([header, pcm]);
+  const tail = Buffer.alloc(tailPadBytes);
+  return Buffer.concat([header, pcm, tail]);
 }
 
 // src/text-extract.ts
@@ -356,16 +393,38 @@ function fromYesimbot(ctx, opts = {}) {
 // src/voices.ts
 var import_node_fs = require("fs");
 var import_node_path = require("path");
+function readJson(dir, fileName) {
+  try {
+    return JSON.parse((0, import_node_fs.readFileSync)((0, import_node_path.join)(dir, fileName), "utf8"));
+  } catch {
+    return void 0;
+  }
+}
+function readText(dir, fileName) {
+  try {
+    const content = (0, import_node_fs.readFileSync)((0, import_node_path.join)(dir, fileName), "utf8").trim();
+    return content || void 0;
+  } catch {
+    return void 0;
+  }
+}
 function readVoiceTranscript(dir, baseName) {
   const candidates = [`${baseName}.txt`, "ref_transcript.txt"];
   for (const c of candidates) {
-    try {
-      const content = (0, import_node_fs.readFileSync)((0, import_node_path.join)(dir, c), "utf8").trim();
-      if (content) return content;
-    } catch {
-    }
+    const content = readText(dir, c);
+    if (content) return content;
   }
   return void 0;
+}
+function deriveStylePrompt(vt) {
+  if (!vt) return void 0;
+  const parts = [];
+  if (vt.persona) parts.push(`\u4EBA\u8BBE\uFF1A${vt.persona}`);
+  if (vt.speech_style?.rhythm) parts.push(`\u8282\u594F\uFF1A${vt.speech_style.rhythm}`);
+  if (vt.speech_style?.punctuation) parts.push(`\u6807\u70B9\uFF1A${vt.speech_style.punctuation}`);
+  if (vt.style_notes) parts.push(vt.style_notes);
+  if (vt.writing_guide) parts.push(vt.writing_guide);
+  return parts.length ? parts.join("\n") : void 0;
 }
 var VoiceLibrary = class {
   constructor(dir) {
@@ -381,19 +440,39 @@ var VoiceLibrary = class {
     }
     const voices = [];
     for (const entry of entries) {
-      if (!entry.toLowerCase().endsWith(".wav")) continue;
-      const baseName = entry.slice(0, -4);
-      const path = (0, import_node_path.join)(this.dir, entry);
+      const full = (0, import_node_path.join)(this.dir, entry);
+      let stats;
       try {
-        if ((0, import_node_fs.statSync)(path).size < 1024) continue;
+        stats = (0, import_node_fs.statSync)(full);
       } catch {
         continue;
       }
-      voices.push({
-        name: baseName,
-        path,
-        transcript: readVoiceTranscript(this.dir, baseName)
-      });
+      let info;
+      if (stats.isDirectory()) {
+        if (!existsRefWav(full)) continue;
+        const promptTemplate = readJson(full, "prompt_template.json");
+        info = {
+          name: entry,
+          path: (0, import_node_path.join)(full, "ref.wav"),
+          transcript: readVoiceTranscript(full, "ref"),
+          meta: readJson(full, "meta.json"),
+          promptTemplate,
+          stylePrompt: deriveStylePrompt(promptTemplate)
+        };
+      } else if (entry.toLowerCase().endsWith(".wav")) {
+        if (stats.size < 1024) continue;
+        const baseName = entry.slice(0, -4);
+        const promptTemplate = readJson(this.dir, `${baseName}.prompt_template.json`);
+        info = {
+          name: baseName,
+          path: full,
+          transcript: readVoiceTranscript(this.dir, baseName),
+          meta: readJson(this.dir, `${baseName}.meta.json`),
+          promptTemplate,
+          stylePrompt: deriveStylePrompt(promptTemplate)
+        };
+      }
+      if (info) voices.push(info);
     }
     voices.sort((a, b) => a.name.localeCompare(b.name));
     return voices;
@@ -414,27 +493,46 @@ var VoiceLibrary = class {
     return voices[0] ?? null;
   }
 };
+function existsRefWav(dir) {
+  try {
+    return (0, import_node_fs.statSync)((0, import_node_path.join)(dir, "ref.wav")).isFile();
+  } catch {
+    return false;
+  }
+}
 
 // src/index.ts
 var DEFAULT_LLM_PROMPT = `\u4F60\u662F\u4E13\u4E1A\u7684\u58F0\u97F3\u5BFC\u6F14\u3002\u628A\u4E0B\u9762\u7684\u5BF9\u8BDD\u56DE\u590D\u6539\u5199\u6210"\u6717\u8BFB\u53CB\u597D\u6587\u672C"\uFF0C\u4EA4\u7ED9 CosyVoice \u5408\u6210\u8BED\u97F3\u3002
 \u8981\u6C42\uFF1A
 1. \u4FDD\u7559\u539F\u610F\u4E0E\u4FE1\u606F\uFF0C\u4E0D\u5F97\u589E\u5220\u4E8B\u5B9E\u3001\u4E0D\u5F97\u6539\u4EBA\u79F0/\u6570\u5B57/\u4E13\u6709\u540D\u8BCD
-2. \u52A0\u5165\u81EA\u7136\u7684\u53E3\u8BED\u8282\u594F\uFF1A\u9002\u5F53\u65AD\u53E5\u3001\u505C\u987F\u63D0\u793A\u3001\u8BED\u6C14\u8BCD\uFF08\u55EF\u3001\u554A\u3001\u54C8\uFF09\uFF0C\u589E\u5F3A\u60C5\u7EEA\u8868\u8FBE
-3. \u4E0D\u8981\u63D2\u5165\u4EFB\u4F55\u65B9\u62EC\u53F7\u6807\u8BB0\uFF08\u5982 [breath] \u7B49\u4F1A\u88AB\u4E22\u5F03\uFF09
-4. \u6807\u70B9\u89C4\u8303\u5316\uFF1A\u53E5\u672B\u5FC5\u987B\u6709\u53E5\u53F7/\u95EE\u53F7/\u611F\u53F9\u53F7\uFF1B\u9017\u53F7\u8868\u793A\u77ED\u505C\u987F\uFF0C\u53E5\u53F7\u8868\u793A\u957F\u505C\u987F
-5. \u82F1\u6587\u5355\u8BCD\u4FDD\u6301\u539F\u6837\uFF0C\u524D\u540E\u52A0\u7A7A\u683C\uFF1B\u6570\u5B57\u6309\u81EA\u7136\u8BFB\u6CD5\u6539\u5199\uFF08\u5982 3.5 \u2192 \u4E09\u70B9\u4E94\uFF09
-6. \u53EA\u8F93\u51FA\u6539\u5199\u540E\u7684\u6587\u672C\u672C\u8EAB\uFF0C\u4E0D\u8981\u89E3\u91CA\u3001\u4E0D\u8981\u5F15\u53F7\u3001\u4E0D\u8981 markdown
-7. \u8F93\u51FA\u957F\u5EA6\u4E0E\u539F\u6587\u672C\u76F8\u5F53\uFF08\xB130%\uFF09\uFF0C\u4E0D\u5F97\u6269\u5199
+2. \u6309\u8BED\u4E49\u610F\u7FA4\u62C6\u53E5\uFF1A\u628A\u957F\u53E5\u5728\u8C13\u8BCD/\u5E76\u5217/\u8FDE\u8BCD\u5904\u62C6\u6210\u51E0\u4E2A\u77ED\u53E5\uFF08\u6BCF\u53E5\u4E00\u4E2A\u5B8C\u6574\u4FE1\u606F\u5757\uFF09\uFF0C\u5E76\u4FDD\u8BC1\u6BCF\u53E5\u7ED3\u5C3E\u6709\u7EC8\u6B62\u6807\u70B9\uFF08\u53E5\u53F7/\u95EE\u53F7/\u611F\u53F9\u53F7\uFF09\uFF1B\u4E0D\u8981\u628A\u4E00\u4E2A\u4FE1\u606F\u5757\u786C\u5207\u6210\u788E\u7247
+3. \u52A0\u5165\u81EA\u7136\u7684\u53E3\u8BED\u8282\u594F\uFF1A\u9002\u5F53\u65AD\u53E5\u3001\u505C\u987F\u63D0\u793A\u3001\u8BED\u6C14\u8BCD\uFF08\u55EF\u3001\u554A\u3001\u54C8\uFF09\uFF0C\u589E\u5F3A\u60C5\u7EEA\u8868\u8FBE
+4. \u4E0D\u8981\u63D2\u5165\u4EFB\u4F55\u65B9\u62EC\u53F7\u6807\u8BB0\uFF08\u5982 [breath] \u7B49\u4F1A\u88AB\u4E22\u5F03\uFF09
+5. \u6807\u70B9\u89C4\u8303\u5316\uFF1A\u53E5\u672B\u5FC5\u987B\u6709\u53E5\u53F7/\u95EE\u53F7/\u611F\u53F9\u53F7\uFF1B\u9017\u53F7\u8868\u793A\u77ED\u505C\u987F\uFF0C\u53E5\u53F7\u8868\u793A\u957F\u505C\u987F
+6. \u82F1\u6587\u5355\u8BCD\u4FDD\u6301\u539F\u6837\uFF0C\u524D\u540E\u52A0\u7A7A\u683C\uFF1B\u6570\u5B57\u6309\u81EA\u7136\u8BFB\u6CD5\u6539\u5199\uFF08\u5982 3.5 \u2192 \u4E09\u70B9\u4E94\uFF09
+7. \u53EA\u8F93\u51FA\u6539\u5199\u540E\u7684\u6587\u672C\u672C\u8EAB\uFF0C\u4E0D\u8981\u89E3\u91CA\u3001\u4E0D\u8981\u5F15\u53F7\u3001\u4E0D\u8981 markdown
+8. \u8F93\u51FA\u957F\u5EA6\u4E0E\u539F\u6587\u672C\u76F8\u5F53\uFF08\xB130%\uFF09\uFF0C\u4E0D\u5F97\u6269\u5199
 
 \u539F\u6587\uFF1A
 {text}`;
+function composeVoicePrompt(stylePrompt) {
+  if (!stylePrompt) return DEFAULT_LLM_PROMPT;
+  return DEFAULT_LLM_PROMPT.replace(
+    "\n\u539F\u6587\uFF1A\n{text}",
+    `
+\u6717\u8BFB\u98CE\u683C\uFF08\u8D34\u5408\u5F53\u524D\u97F3\u8272\uFF0C\u4F46\u4E25\u7981\u589E\u5220\u6216\u6539\u53D8\u539F\u610F\u7684\u5B57\u9762\u5185\u5BB9\uFF0C\u53EA\u5FAE\u8C03\u8BED\u6C14\u4E0E\u63AA\u8F9E\uFF09\uFF1A
+${stylePrompt}
+
+\u539F\u6587\uFF1A
+{text}`
+  );
+}
 var name = "aka-yesimbot-voice";
 var inject = ["yesimbot"];
 var Config = import_koishi2.Schema.object({
   hint: import_koishi2.Schema.object({}).description(
-    "\u628A\u8FD9\u4E2A Bot \u7684\u56DE\u590D\u8F6C\u6210\u8BED\u97F3\u53D1\u5230 QQ \u7FA4\u3002\n\u97F3\u8272\u76EE\u5F55\uFF1Adata/aka-yesimbot-voice/voices\uFF08\u53EF\u5728\u4E0B\u65B9 voiceDir \u4FEE\u6539\uFF09\u3002\n\u653E\u5165 <\u97F3\u8272\u540D>.wav \u548C\u540C\u540D <\u97F3\u8272\u540D>.txt\uFF08txt = \u8BE5 wav \u53C2\u8003\u97F3\u9891\u7684\u771F\u5B9E\u8F6C\u5199\uFF09\u5373\u65B0\u589E\u97F3\u8272\uFF0C\u91CD\u542F\u540E\u81EA\u52A8\u51FA\u73B0\u5728\u4E0B\u65B9 voice \u4E0B\u62C9\u3002"
+    "\u628A bot \u7684\u56DE\u590D\u8F6C\u6210\u8BED\u97F3\u53D1\u5230 QQ \u7FA4\u3002\n\n\u25A0 \u97F3\u8272\u6587\u4EF6\n\u97F3\u8272\u76EE\u5F55\uFF1Adata/aka-yesimbot-voice/voices\uFF08\u4E0B\u65B9 voiceDir\uFF09\n\u6BCF\u4E2A\u97F3\u8272 = <\u97F3\u8272\u540D>.wav\uFF08\u53C2\u8003\u97F3\u9891\uFF09+ \u540C\u540D <\u97F3\u8272\u540D>.txt\uFF08\u8BE5\u97F3\u9891\u7684\u771F\u5B9E\u8F6C\u5199\uFF09\n\u653E\u5165\u5373\u65B0\u589E\uFF0C\u91CD\u542F\u540E\u81EA\u52A8\u53EF\u7528\u3002\n\n\u25A0 \u5F53\u524D\u97F3\u8272\n\u552F\u4E00\u771F\u6E90 = data/aka-yesimbot-voice/settings.json\n\u7528 .voice \u547D\u4EE4\u5207\u6362\uFF1A.voice \u67E5\u770B\u5217\u8868\uFF0C.voice <\u97F3\u8272\u540D> \u5207\u6362\n\u672C\u914D\u7F6E\u9875\u4E0D\u8BBE\u7F6E\u97F3\u8272\u3002"
   ),
-  voice: import_koishi2.Schema.dynamic("yesimbot-voice.voices").default("auto").description("\u5F53\u524D\u97F3\u8272\uFF1Aauto=\u97F3\u8272\u76EE\u5F55\u7B2C\u4E00\u4E2A\uFF1B\u4E0B\u62C9\u9009\u62E9\u6216\u641C\u7D22\u97F3\u8272\u540D"),
   probability: import_koishi2.Schema.number().min(0).max(1).default(1).description("\u6BCF\u6761\u56DE\u590D\u914D\u8BED\u97F3\u6982\u7387"),
   llm: import_koishi2.Schema.boolean().default(true).description("LLM \u8BED\u97F3\u6548\u679C\u6E32\u67D3\uFF08\u8D70 yesimbot \u4E3B\u6A21\u578B\uFF1B\u5931\u8D25\u81EA\u52A8\u964D\u7EA7\u89C4\u5219\u5C42\uFF09"),
   voiceDir: import_koishi2.Schema.string().default("data/aka-yesimbot-voice/voices").description("\u97F3\u8272\u6E90\u76EE\u5F55\uFF1A\u5F80\u91CC\u653E/\u5220 *.wav \u5373\u589E\u5220\u97F3\u8272\uFF08\u91CD\u542F\u751F\u6548\uFF09"),
@@ -447,7 +545,10 @@ var Config = import_koishi2.Schema.object({
     groupOnly: import_koishi2.Schema.boolean().default(true).description("\u4EC5\u7FA4\u804A\u914D\u8BED\u97F3"),
     onMentionOnly: import_koishi2.Schema.boolean().default(false).description("\u4EC5\u88AB @ \u65F6\u914D\u8BED\u97F3"),
     replaceText: import_koishi2.Schema.boolean().default(true).description("\u547D\u4E2D\u65F6\u541E\u6389 yesimbot \u6587\u672C\u53EA\u53D1\u8BED\u97F3\uFF08TTS \u5931\u8D25\u81EA\u52A8\u8865\u53D1\u6587\u672C\uFF09"),
-    napcatHttpUrl: import_koishi2.Schema.string().default("http://mita_napcat:6199").description("NapCat HTTP API\uFF08QQ \u8BED\u97F3\u76F4\u53D1\uFF09")
+    napcatHttpUrl: import_koishi2.Schema.string().default("http://mita_napcat:6199").description("NapCat HTTP API\uFF08QQ \u8BED\u97F3\u76F4\u53D1\uFF09"),
+    ttsSpeed: import_koishi2.Schema.number().min(0.5).max(2).step(0.05).default(1.2).description("\u5408\u6210\u8BED\u901F\uFF08CV3 \u89C4\u8303\u63A8\u8350 1.2\uFF1B1.0 \u504F\u6162\u30011.3 \u504F\u5FEB\uFF09"),
+    loudnorm: import_koishi2.Schema.boolean().default(true).description("\u5408\u6210\u540E\u505A\u54CD\u5EA6\u5F52\u4E00\u5316\u5230 -20 LUFS\uFF08\u8D70\u670D\u52A1\u7AEF /loudnorm\uFF1B\u7AEF\u70B9\u4E0D\u53EF\u7528\u81EA\u52A8\u8DF3\u8FC7\uFF09"),
+    ttsTailPadMs: import_koishi2.Schema.number().min(0).max(2e3).default(400).description("\u5408\u6210 WAV \u672B\u5C3E\u8FFD\u52A0\u9759\u97F3 ms\uFF08\u9632 QQ Silk \u5E27\u7F16\u7801\u541E\u6389\u672B\u97F3\u8282\uFF1B0=\u4E0D\u586B\u5145\uFF09")
   }).description("\u9AD8\u7EA7\u8BBE\u7F6E\uFF08\u4E00\u822C\u4E0D\u7528\u52A8\uFF09")
 });
 function apply(ctx, config) {
@@ -455,7 +556,10 @@ function apply(ctx, config) {
   const adv = config.advanced;
   const tts = new TtsClient({
     apiBase: adv.ttsApiBase,
-    timeoutMs: adv.ttsTimeoutMs
+    timeoutMs: adv.ttsTimeoutMs,
+    tailPadMs: adv.ttsTailPadMs,
+    speed: adv.ttsSpeed,
+    loudnorm: adv.loudnorm
   });
   const absVoiceDir = resolveVoiceDir(ctx, config.voiceDir);
   const outputDir = outputDirOf(absVoiceDir);
@@ -482,30 +586,8 @@ function apply(ctx, config) {
   function resolveCurrentVoice() {
     const saved = readSavedVoice();
     if (saved) return saved;
-    return config.voice || "auto";
+    return "auto";
   }
-  const registerVoiceOptions = () => {
-    const list = voices.scan();
-    if (!ctx.schema) {
-      logger.warn("voice schema: ctx.schema service unavailable");
-      return;
-    }
-    try {
-      const options = [
-        import_koishi2.Schema.const("auto").description("auto\uFF08\u97F3\u8272\u76EE\u5F55\u7B2C\u4E00\u4E2A\uFF09"),
-        ...list.map((v) => import_koishi2.Schema.const(v.name).description(v.name))
-      ];
-      ctx.schema.set("yesimbot-voice.voices", import_koishi2.Schema.union(options));
-      logger.info("voice schema dynamic source registered: yesimbot-voice.voices (%d options)", list.length + 1);
-    } catch (err) {
-      logger.warn("voice schema dynamic source register failed: %s", err instanceof Error ? err.message : String(err));
-    }
-  };
-  registerVoiceOptions();
-  const rescanTimer = setInterval(() => {
-    registerVoiceOptions();
-  }, 3e4);
-  ctx.on("dispose", () => clearInterval(rescanTimer));
   let llmChannel = null;
   if (config.llm) {
     llmChannel = fromYesimbot(ctx, { logger });
@@ -522,7 +604,9 @@ function apply(ctx, config) {
     logger
   };
   async function renderVoice(text) {
-    return render(text, renderOpts);
+    const voice = currentVoice();
+    const prompt = composeVoicePrompt(voice?.stylePrompt);
+    return render(text, { ...renderOpts, prompt });
   }
   const policyCfg = {
     ttsEnabled: true,
@@ -533,16 +617,21 @@ function apply(ctx, config) {
     groupOnly: adv.groupOnly,
     onMentionOnly: adv.onMentionOnly
   };
-  const lastSpeakAt = /* @__PURE__ */ new Map();
-  const pendingVoice = /* @__PURE__ */ new Map();
-  const turnSegments = /* @__PURE__ */ new Map();
-  const forceVoiceChannels = /* @__PURE__ */ new Map();
   const FORCE_VOICE_TTL = 12e4;
-  function isForceArmed(channelId) {
-    const exp = forceVoiceChannels.get(channelId);
+  function voiceState(bot) {
+    const b = bot;
+    return b._akaVoiceState ??= {
+      pendingVoice: /* @__PURE__ */ new Map(),
+      turnSegments: /* @__PURE__ */ new Map(),
+      forceVoiceChannels: /* @__PURE__ */ new Map(),
+      lastSpeakAt: /* @__PURE__ */ new Map()
+    };
+  }
+  function isForceArmed(st, channelId) {
+    const exp = st.forceVoiceChannels.get(channelId);
     if (exp === void 0) return false;
     if (Date.now() > exp) {
-      forceVoiceChannels.delete(channelId);
+      st.forceVoiceChannels.delete(channelId);
       return false;
     }
     return true;
@@ -553,7 +642,7 @@ function apply(ctx, config) {
     const resolved = voice?.name ?? null;
     if (requested && requested !== "auto" && requested !== resolved) {
       logger.warn(
-        "voice resolve MISMATCH: requested=%s resolved=%s (fallback) \u2014 check config.voice / settings.json / voiceDir files",
+        "voice resolve MISMATCH: requested=%s resolved=%s (fallback) \u2014 check settings.json / voiceDir files",
         requested,
         resolved
       );
@@ -561,11 +650,12 @@ function apply(ctx, config) {
     return voice;
   }
   function consumePending(channelId, bot, platform) {
-    const item = pendingVoice.get(channelId);
+    const st = voiceState(bot);
+    const item = st.pendingVoice.get(channelId);
     if (!item || item.consumed) return;
     item.consumed = true;
     if (item.timer) clearTimeout(item.timer);
-    pendingVoice.delete(channelId);
+    st.pendingVoice.delete(channelId);
     const text = item.text;
     void (async () => {
       try {
@@ -573,9 +663,9 @@ function apply(ctx, config) {
         const voice = currentVoice();
         const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, voice ?? void 0);
         await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl);
-        lastSpeakAt.set(channelId, Date.now());
+        st.lastSpeakAt.set(channelId, Date.now());
         logger.info(
-          "voice sent (text replaced) channel=%s voice=%s path=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s rendered=%s",
+          "voice sent (text replaced) channel=%s voice=%s path=%s len=%d dur=%dms source=%s ratio=%s degraded=%s loudnorm=%s%s rendered=%s",
           channelId,
           voice?.name ?? "none",
           voice?.path ?? "",
@@ -584,6 +674,7 @@ function apply(ctx, config) {
           rendered.source,
           rendered.ratio.toFixed(3),
           rendered.degraded,
+          String(out.loudnormApplied ?? false),
           rendered.reason ? ` reason=${rendered.reason}` : "",
           rendered.text.slice(0, 40)
         );
@@ -599,7 +690,8 @@ function apply(ctx, config) {
     })();
   }
   function queuePending(bot, channelId, platform, text) {
-    const existing = pendingVoice.get(channelId);
+    const st = voiceState(bot);
+    const existing = st.pendingVoice.get(channelId);
     if (existing && !existing.consumed) {
       existing.text = existing.text.length > text.length ? existing.text : text;
       if (existing.timer) clearTimeout(existing.timer);
@@ -607,7 +699,7 @@ function apply(ctx, config) {
       return;
     }
     const timer = setTimeout(() => consumePending(channelId, bot, platform), 600);
-    pendingVoice.set(channelId, { text, timer, consumed: false });
+    st.pendingVoice.set(channelId, { text, timer, consumed: false });
   }
   function extractSendText(content) {
     if (typeof content === "string") return content.trim();
@@ -660,7 +752,8 @@ ${lines}
     const cid = String(session.channelId ?? session.cid ?? "");
     if (!cid) return "\u65E0\u6CD5\u786E\u5B9A\u4F1A\u8BDD\u9891\u9053\u3002";
     setTimeout(() => {
-      forceVoiceChannels.set(cid, Date.now() + FORCE_VOICE_TTL);
+      if (!session.bot) return;
+      voiceState(session.bot).forceVoiceChannels.set(cid, Date.now() + FORCE_VOICE_TTL);
       logger.info(".\u8BF4\u8BDD force-voice armed channel=%s (voice=%s)", cid, resolveCurrentVoice());
     }, 300);
     return "\u{1F50A} \u6536\u5230\uFF0C\u4E0B\u4E00\u53E5\u6211\u7528\u8BED\u97F3\u56DE\u4F60\u3002";
@@ -681,12 +774,13 @@ ${lines}
       bot.sendMessage = (async (cid, content, ...rest) => {
         const text = extractSendText(content);
         const cidStr = String(cid);
-        if (text && isShared && !pendingVoice.has(cidStr)) {
-          const segments = turnSegments.get(cidStr) ?? [];
+        const st = voiceState(bot);
+        if (text && isShared && !st.pendingVoice.has(cidStr)) {
+          const segments = st.turnSegments.get(cidStr) ?? [];
           const isTurnReply = segments.includes(text);
-          const forced = isForceArmed(cidStr);
+          const forced = isForceArmed(st, cidStr);
           if (forced) {
-            forceVoiceChannels.delete(cidStr);
+            st.forceVoiceChannels.delete(cidStr);
             logger.info("text replaced by voice (forced) channel=%s reason=force-voice text=%s", cidStr, text.slice(0, 30));
             queuePending(bot, cidStr, platform, text);
             return [];
@@ -698,7 +792,7 @@ ${lines}
               isShared,
               mentioned: false,
               now: Date.now(),
-              lastSpeakAt: lastSpeakAt.get(cidStr) ?? 0
+              lastSpeakAt: st.lastSpeakAt.get(cidStr) ?? 0
             });
             if (decision.speak) {
               logger.info("text replaced by voice channel=%s reason=%s text=%s", cidStr, decision.reason, text.slice(0, 30));
@@ -707,7 +801,7 @@ ${lines}
             }
             logger.info("text kept (voice skip) channel=%s reason=%s text=%s", cidStr, decision.reason, text.slice(0, 30));
           }
-        } else if (text && pendingVoice.has(cidStr)) {
+        } else if (text && st.pendingVoice.has(cidStr)) {
           queuePending(bot, cidStr, platform, text);
           return [];
         }
@@ -729,7 +823,7 @@ ${lines}
           description: "\u628A\u300C\u672C\u6761\u56DE\u590D\u300D\u7528\u8BED\u97F3\uFF08QQ \u8BED\u97F3\u6D88\u606F\uFF09\u8BF4\u51FA\u800C\u4E0D\u662F\u7EAF\u6587\u672C\u53D1\u9001\u3002\u9002\u7528\u573A\u666F\uFF1A\u7FA4\u53CB\u660E\u786E\u8981\u6C42\u4F60\u7528\u8BED\u97F3\u3001\u6216\u4F60\u60F3\u7528\u300C\u558A\u8BDD/\u5F3A\u8C03/\u6709\u60C5\u7EEA\u300D\u7684\u65B9\u5F0F\u8868\u8FBE\u67D0\u53E5\u8BDD\u65F6\u3002\u8C03\u7528\u540E\u672C\u8F6E\u4F60\u7684\u6587\u672C\u56DE\u590D\u4F1A\u88AB\u8F6C\u6210\u8BED\u97F3\u53D1\u51FA\u3002\u5E73\u65F6\u4E0D\u8981\u7528\uFF0C\u4EC5\u5728\u7528\u6237\u8981\u6C42\u6216\u4F60\u60F3\u5F3A\u8C03\u8BED\u6C14\u65F6\u8C03\u7528\u3002",
           parameters: { type: "object", properties: {}, additionalProperties: false },
           execute: async () => {
-            forceVoiceChannels.set(channelId, Date.now() + FORCE_VOICE_TTL);
+            voiceState(bot).forceVoiceChannels.set(channelId, Date.now() + FORCE_VOICE_TTL);
             logger.info("use_voice tool invoked channel=%s voice=%s", channelId, resolveCurrentVoice());
             return "\u5DF2\u8BBE\u7F6E\uFF1A\u672C\u6761\u56DE\u590D\u5C06\u7528\u8BED\u97F3\u53D1\u9001\u3002";
           }
@@ -744,14 +838,15 @@ ${lines}
           if (data?.role !== "assistant") continue;
           const segments = extractTurnSegments(data.content);
           if (segments.length > 0) {
-            turnSegments.set(channelId, segments);
+            voiceState(bot).turnSegments.set(channelId, segments);
           }
         }
       },
       // replaceText 模式：turn 结束立即消费；否则在 turn 结束按策略附带语音
       async onTurnFinish(result) {
+        const st = voiceState(bot);
         if (adv.replaceText) {
-          const item = pendingVoice.get(channelId);
+          const item = st.pendingVoice.get(channelId);
           if (item && !item.consumed) {
             consumePending(channelId, bot, platform);
           }
@@ -767,7 +862,7 @@ ${lines}
           isShared,
           mentioned: false,
           now,
-          lastSpeakAt: lastSpeakAt.get(channelId) ?? 0
+          lastSpeakAt: st.lastSpeakAt.get(channelId) ?? 0
         });
         if (!decision.speak) {
           logger.info("skip voice channel=%s reason=%s text=%s", channelId, decision.reason, text.slice(0, 30));
@@ -779,9 +874,9 @@ ${lines}
             const voice = currentVoice();
             const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, voice ?? void 0);
             await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl);
-            lastSpeakAt.set(channelId, Date.now());
+            st.lastSpeakAt.set(channelId, Date.now());
             logger.info(
-              "voice sent channel=%s voice=%s path=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s wav=%s",
+              "voice sent channel=%s voice=%s path=%s len=%d dur=%dms source=%s ratio=%s degraded=%s loudnorm=%s%s wav=%s",
               channelId,
               voice?.name ?? "none",
               voice?.path ?? "",
@@ -790,6 +885,7 @@ ${lines}
               rendered.source,
               rendered.ratio.toFixed(3),
               rendered.degraded,
+              String(out.loudnormApplied ?? false),
               rendered.reason ? ` reason=${rendered.reason}` : "",
               out.wavPath
             );

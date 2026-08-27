@@ -11,8 +11,6 @@ declare const inject: string[];
 interface Config {
     /** 设置页顶部说明（纯信息，不参与运行业务） */
     hint: object;
-    /** 音色名；'auto' = 音色目录按字母序第一个 */
-    voice: string;
     /** 每条回复配语音概率 0-1 */
     probability: number;
     /** LLM 语音效果渲染（走 yesimbot 主模型通道；失败自动降级规则层） */
@@ -38,6 +36,12 @@ interface Config {
         replaceText: boolean;
         /** NapCat HTTP API（QQ 语音直发） */
         napcatHttpUrl: string;
+        /** 合成语速（CV3 规范推荐 1.2；1.0 偏慢、1.3 偏快） */
+        ttsSpeed: number;
+        /** 合成后做响度归一化到 -20 LUFS（走服务端 /loudnorm；端点不可用自动跳过） */
+        loudnorm: boolean;
+        /** 合成 WAV 末尾追加静音 ms（防 QQ Silk 帧编码吞掉末音节，默认 400） */
+        ttsTailPadMs: number;
     };
 }
 declare const Config: Schema<Config>;

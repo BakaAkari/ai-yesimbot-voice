@@ -4,6 +4,17 @@ export interface TtsClientConfig {
   apiBase: string
   /** 请求超时 ms */
   timeoutMs: number
+  /** 合成语速（CV3 规范推荐 1.2；传给 /inference_zero_shot 的 speed 字段） */
+  speed?: number
+  /** 合成后调服务端 /loudnorm 归一化到 -20 LUFS；端点不可用/失败时静默降级返回原 PCM */
+  loudnorm?: boolean
+  /**
+   * 合成 WAV 末尾追加的静音时长 ms。
+   * 背景：CosyVoice3 在 stop token 处硬切、无尾静音，且 QQ 语音经 Silk/AMR 帧编码，
+   * 末尾无静音缓冲时最后一帧语音会被吞掉 → 播放时末尾 1-2 字被截断。
+   * 追加一段尾部静音给编码器留缓冲帧即可避免。0 = 不填充。
+   */
+  tailPadMs: number
 }
 
 /** 合成所需的音色：参考音频路径 + 可选参考转写（zero_shot 的 prompt_text） */
@@ -19,8 +30,10 @@ export interface TtsSynthesisResult {
   wavPath: string
   /** 合成耗时 ms */
   durationMs: number
-  /** 原始 PCM 字节数 */
+  /** 原始 PCM 字节数（响度归一化后） */
   pcmBytes: number
+  /** 是否实际应用了服务端 /loudnorm 响度归一化（false=端点不可用或失败已降级） */
+  loudnormApplied?: boolean
 }
 
 const WAV_HEADER_SIZE = 44
@@ -53,6 +66,7 @@ export class TtsClient {
     }
     pushField('tts_text', text)
     pushField('prompt_text', promptText)
+    pushField('speed', String(this.config.speed ?? 1.2))
     if (voice?.path) {
       const fs = await import('node:fs')
       const audio = await fs.promises.readFile(voice.path)
@@ -79,27 +93,67 @@ export class TtsClient {
       const detail = await response.text().catch(() => '')
       throw new Error(`TTS HTTP ${response.status}: ${detail.slice(0, 200)}`)
     }
-    const pcm = Buffer.from(await response.arrayBuffer())
+    let pcm = Buffer.from(await response.arrayBuffer()) as Buffer
     if (pcm.length < WAV_HEADER_SIZE) throw new Error(`TTS empty audio (${pcm.length} bytes)`)
+
+    // 响度归一化（可选）：调服务端 /loudnorm 归一化到 -20 LUFS（TP -2 / LRA 11）。
+    // 端点不可用或失败时静默降级返回原 PCM（不阻断合成），由 TtsSynthesisResult.loudnormApplied 标记实际是否应用。
+    let loudnormApplied = false
+    if (this.config.loudnorm) {
+      const ln = await this.applyLoudnorm(pcm)
+      pcm = ln.pcm
+      loudnormApplied = ln.applied
+    }
 
     const { mkdir } = await import('node:fs/promises')
     const { join } = await import('node:path')
     await mkdir(outDir, { recursive: true })
     const wavPath = join(outDir, outName)
     const fs = await import('node:fs')
-    await fs.promises.writeFile(wavPath, wrapWav(pcm))
-    return { wavPath, durationMs: Date.now() - startedAt, pcmBytes: pcm.length }
+    await fs.promises.writeFile(wavPath, wrapWav(pcm, this.config.tailPadMs))
+    return { wavPath, durationMs: Date.now() - startedAt, pcmBytes: pcm.length, loudnormApplied }
+  }
+
+  /**
+   * 调服务端 /loudnorm，把 24kHz mono s16 PCM 归一化到 -20 LUFS。
+   * 失败（网络/非 2xx/返回过小）返回 { pcm: 原样, applied: false }，绝不抛错。
+   */
+  private async applyLoudnorm(pcm: Buffer): Promise<{ pcm: Buffer; applied: boolean }> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), this.config.timeoutMs)
+    try {
+      const res = await this.fetchLike(`${this.config.apiBase.replace(/\/+$/, '')}/loudnorm`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': String(pcm.length),
+        },
+        body: new Uint8Array(pcm),
+        signal: controller.signal,
+      })
+      if (!res.ok) return { pcm, applied: false }
+      const out = Buffer.from(await res.arrayBuffer())
+      if (out.length < WAV_HEADER_SIZE) return { pcm, applied: false }
+      return { pcm: out, applied: true }
+    } catch {
+      return { pcm, applied: false }
+    } finally {
+      clearTimeout(timer)
+    }
   }
 }
 
-/** 把 24kHz 16bit mono PCM 封装为 WAV（RIFF header） */
-export function wrapWav(pcm: Buffer): Buffer {
+/** 把 24kHz 16bit mono PCM 封装为 WAV（RIFF header），末尾可追加静音缓冲 */
+export function wrapWav(pcm: Buffer, tailPadMs = 0): Buffer {
   const sampleRate = 24000
   const channels = 1
   const bitsPerSample = 16
   const byteRate = sampleRate * channels * bitsPerSample / 8
   const blockAlign = channels * bitsPerSample / 8
-  const dataSize = pcm.length
+  // 尾部静音填充：给 Silk/AMR 帧编码留缓冲帧，避免末尾音节被吞（默认 0 保持原行为）
+  const tailPadSamples = Math.max(0, Math.round((tailPadMs / 1000) * sampleRate))
+  const tailPadBytes = tailPadSamples * channels * bitsPerSample / 8
+  const dataSize = pcm.length + tailPadBytes
   const header = Buffer.alloc(WAV_HEADER_SIZE)
   header.write('RIFF', 0)
   header.writeUInt32LE(36 + dataSize, 4)
@@ -114,5 +168,7 @@ export function wrapWav(pcm: Buffer): Buffer {
   header.writeUInt16LE(bitsPerSample, 34)
   header.write('data', 36)
   header.writeUInt32LE(dataSize, 40)
-  return Buffer.concat([header, pcm])
+  // 零填充（静音）
+  const tail = Buffer.alloc(tailPadBytes)
+  return Buffer.concat([header, pcm, tail])
 }

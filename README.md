@@ -20,7 +20,7 @@ NapCat HTTP API 直发（base64:// record，自动转 amr 上传 QQ CDN）
 
 - **语音发送**：回复文本 → 策略判定 → TTS 合成 → QQ 群语音直发。
 - **文本替换（可选）**：`replaceText: true` 时命中语音的回复**不发文本、只发语音**；TTS 失败自动补发文本兜底。
-- **zero_shot 音色**：音色 = `voiceDir/<音色名>.wav` + 同名 `<音色名>.txt`（参考音频及**真实转写**），合成时转写作为 `prompt_text` 传 `/inference_zero_shot` 做语音条件对齐。更新音源 = 覆盖这两个文件，自包含、不依赖外部音色库路径。
+- **zero_shot 音色**：音色 = `voiceDir/<音色名>.wav` + 同名 `<音色名>.txt`（参考音频及**真实转写**），合成时转写作为 `prompt_text` 传 `/inference_zero_shot` 做语音条件对齐。更新音源 = 覆盖这两个文件，自包含、不依赖外部音色库路径。可选在同目录放 `<音色名>.meta.json` 与 `<音色名>.prompt_template.json`（源自 CV3 音源库），插件会读取其 persona/风格并注入 LLM 改写层；也支持 CV3 子目录结构 `<音色名>/ref.wav` + `ref_transcript.txt` + `meta.json` + `prompt_template.json`。
 - **语音按需（use_voice）**：给 yesimbot LLM 注册 `use_voice` 工具，米塔想用语音「喊话/强调/应群友要求」时主动调用，本轮回复 100% 走语音。
 - **音色唯一真源**：当前音色只存于 `data/aka-yesimbot-voice/settings.json`，用 `.voice` 命令切换（`.voice` 查看列表，`.voice <音色名>` 切换），重启不丢。
 
@@ -101,6 +101,8 @@ npm i koishi-plugin-aka-yesimbot-voice
 | `advanced.onMentionOnly` | `false` | 仅被 @ 时配语音 |
 | `advanced.replaceText` | `true` | 命中语音时吞掉文本回复、只发语音（TTS 失败补发文本） |
 | `advanced.napcatHttpUrl` | `http://mita_napcat:6199` | NapCat HTTP API（QQ 语音直发） |
+| `advanced.ttsSpeed` | `1.2` | 合成语速（CV3 规范推荐 1.2；1.0 偏慢、1.3 偏快） |
+| `advanced.loudnorm` | `true` | 合成后响度归一化到 -20 LUFS（走服务端 `/loudnorm`；端点不可用自动跳过） |
 
 > 当前音色**不在本配置页设置**，由 `.voice` 命令写入 `settings.json`（唯一真源）。
 

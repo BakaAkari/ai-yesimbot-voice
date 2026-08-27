@@ -12,15 +12,29 @@ import { VoiceLibrary, type VoiceInfo } from './voices.js'
 const DEFAULT_LLM_PROMPT = `你是专业的声音导演。把下面的对话回复改写成\"朗读友好文本\"，交给 CosyVoice 合成语音。
 要求：
 1. 保留原意与信息，不得增删事实、不得改人称/数字/专有名词
-2. 加入自然的口语节奏：适当断句、停顿提示、语气词（嗯、啊、哈），增强情绪表达
-3. 不要插入任何方括号标记（如 [breath] 等会被丢弃）
-4. 标点规范化：句末必须有句号/问号/感叹号；逗号表示短停顿，句号表示长停顿
-5. 英文单词保持原样，前后加空格；数字按自然读法改写（如 3.5 → 三点五）
-6. 只输出改写后的文本本身，不要解释、不要引号、不要 markdown
-7. 输出长度与原文本相当（±30%），不得扩写
+2. 按语义意群拆句：把长句在谓词/并列/连词处拆成几个短句（每句一个完整信息块），并保证每句结尾有终止标点（句号/问号/感叹号）；不要把一个信息块硬切成碎片
+3. 加入自然的口语节奏：适当断句、停顿提示、语气词（嗯、啊、哈），增强情绪表达
+4. 不要插入任何方括号标记（如 [breath] 等会被丢弃）
+5. 标点规范化：句末必须有句号/问号/感叹号；逗号表示短停顿，句号表示长停顿
+6. 英文单词保持原样，前后加空格；数字按自然读法改写（如 3.5 → 三点五）
+7. 只输出改写后的文本本身，不要解释、不要引号、不要 markdown
+8. 输出长度与原文本相当（±30%），不得扩写
 
 原文：
 {text}`
+
+/**
+ * 按当前音色把 CV3 的 persona/朗读风格注入 LLM 改写 prompt。
+ * 有 stylePrompt 时在「原文」前插入一段朗读风格参考（贴合音色，但禁止改原意字面内容）；
+ * 无则退回基础 prompt。
+ */
+function composeVoicePrompt(stylePrompt?: string): string {
+  if (!stylePrompt) return DEFAULT_LLM_PROMPT
+  return DEFAULT_LLM_PROMPT.replace(
+    '\n原文：\n{text}',
+    `\n朗读风格（贴合当前音色，但严禁增删或改变原意的字面内容，只微调语气与措辞）：\n${stylePrompt}\n\n原文：\n{text}`,
+  )
+}
 
 export const name = 'aka-yesimbot-voice'
 
@@ -61,6 +75,12 @@ export interface Config {
     replaceText: boolean
     /** NapCat HTTP API（QQ 语音直发） */
     napcatHttpUrl: string
+    /** 合成语速（CV3 规范推荐 1.2；1.0 偏慢、1.3 偏快） */
+    ttsSpeed: number
+    /** 合成后做响度归一化到 -20 LUFS（走服务端 /loudnorm；端点不可用自动跳过） */
+    loudnorm: boolean
+    /** 合成 WAV 末尾追加静音 ms（防 QQ Silk 帧编码吞掉末音节，默认 400） */
+    ttsTailPadMs: number
   }
 }
 
@@ -82,6 +102,9 @@ export const Config: Schema<Config> = Schema.object({
     onMentionOnly: Schema.boolean().default(false).description('仅被 @ 时配语音'),
     replaceText: Schema.boolean().default(true).description('命中时吞掉 yesimbot 文本只发语音（TTS 失败自动补发文本）'),
     napcatHttpUrl: Schema.string().default('http://mita_napcat:6199').description('NapCat HTTP API（QQ 语音直发）'),
+    ttsSpeed: Schema.number().min(0.5).max(2).step(0.05).default(1.2).description('合成语速（CV3 规范推荐 1.2；1.0 偏慢、1.3 偏快）'),
+    loudnorm: Schema.boolean().default(true).description('合成后做响度归一化到 -20 LUFS（走服务端 /loudnorm；端点不可用自动跳过）'),
+    ttsTailPadMs: Schema.number().min(0).max(2000).default(400).description('合成 WAV 末尾追加静音 ms（防 QQ Silk 帧编码吞掉末音节；0=不填充）'),
   }).description('高级设置（一般不用动）'),
 })
 
@@ -91,6 +114,9 @@ export function apply(ctx: Context, config: Config) {
   const tts = new TtsClient({
     apiBase: adv.ttsApiBase,
     timeoutMs: adv.ttsTimeoutMs,
+    tailPadMs: adv.ttsTailPadMs,
+    speed: adv.ttsSpeed,
+    loudnorm: adv.loudnorm,
   } satisfies TtsClientConfig)
 
   // 音色库：volatile 生命周期内每次解析都重新扫描目录（放/删音色重启生效）
@@ -143,7 +169,10 @@ export function apply(ctx: Context, config: Config) {
     logger,
   }
   async function renderVoice(text: string) {
-    return render(text, renderOpts)
+    const voice = currentVoice()
+    // 按当前音色把 CV3 persona/朗读风格注入 LLM 改写层（无 stylePrompt 时退回基础 prompt）
+    const prompt = composeVoicePrompt(voice?.stylePrompt)
+    return render(text, { ...renderOpts, prompt })
   }
 
   const policyCfg: TtsPolicyConfig = {
@@ -219,9 +248,9 @@ export function apply(ctx: Context, config: Config) {
         await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl)
         st.lastSpeakAt.set(channelId, Date.now())
         logger.info(
-          'voice sent (text replaced) channel=%s voice=%s path=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s rendered=%s',
+          'voice sent (text replaced) channel=%s voice=%s path=%s len=%d dur=%dms source=%s ratio=%s degraded=%s loudnorm=%s%s rendered=%s',
           channelId, voice?.name ?? 'none', voice?.path ?? '', out.pcmBytes, out.durationMs, rendered.source,
-          rendered.ratio.toFixed(3), rendered.degraded,
+          rendered.ratio.toFixed(3), rendered.degraded, String(out.loudnormApplied ?? false),
           rendered.reason ? ` reason=${rendered.reason}` : '', rendered.text.slice(0, 40),
         )
       } catch (err) {
@@ -456,9 +485,9 @@ export function apply(ctx: Context, config: Config) {
             await sendVoice(bot, channelId, out.wavPath, platform, adv.napcatHttpUrl)
             st.lastSpeakAt.set(channelId, Date.now())
             logger.info(
-              'voice sent channel=%s voice=%s path=%s len=%d dur=%dms source=%s ratio=%s degraded=%s%s wav=%s',
+              'voice sent channel=%s voice=%s path=%s len=%d dur=%dms source=%s ratio=%s degraded=%s loudnorm=%s%s wav=%s',
               channelId, voice?.name ?? 'none', voice?.path ?? '', out.pcmBytes, out.durationMs, rendered.source,
-              rendered.ratio.toFixed(3), rendered.degraded,
+              rendered.ratio.toFixed(3), rendered.degraded, String(out.loudnormApplied ?? false),
               rendered.reason ? ` reason=${rendered.reason}` : '', out.wavPath,
             )
           } catch (err) {
