@@ -1,6 +1,16 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.2] - 2026-08-28
+
+### 修复：缺 `You are a helpful assistant.<|endofprompt|>` 前置导致回复回显混入参考转写
+
+**现象**：合成语音里混入参考音频转写的内容（如 halo 的长转写尾巴被念出来、音频明显变长）。
+
+**根因（实测复现 2026-08-28）**：`TtsClient.synthesize` 把 `prompt_text` 直接填转写，未带 `You are a helpful assistant.<|endofprompt|>` 前置。服务端只自动补**结尾** `<|endofprompt|>`、不补**开头前置**；缺此前置时 zero_shot 会把转写当正文回显混入。直调对比：裸转写 7.46s（混入） vs 带前置 2.46s（干净）。
+
+**改动**：`prompt_text = "You are a helpful assistant.<|endofprompt|>" + 转写`（无转写时仍为空串，不加前缀）。
+
+**验证**：typecheck ✅ + 单测更新（断言前缀）✅ + build ✅。
 
 ## [0.7.1] - 2026-08-28
 

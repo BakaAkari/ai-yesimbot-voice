@@ -51,7 +51,8 @@ var TtsClient = class {
     const { apiBase, timeoutMs } = this.config;
     const boundary = `----akaTts${Date.now()}${Math.random().toString(16).slice(2)}`;
     const chunks = [];
-    const promptText = (voice?.transcript ?? "").trim();
+    const rawTranscript = (voice?.transcript ?? "").trim();
+    const promptText = rawTranscript ? `You are a helpful assistant.<|endofprompt|>${rawTranscript}` : "";
     const pushField = (name2, value) => {
       chunks.push(Buffer.from(`--${boundary}\r
 Content-Disposition: form-data; name="${name2}"\r

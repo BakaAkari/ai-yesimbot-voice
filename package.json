@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-aka-yesimbot-voice",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "YesImBot v4 语音组件：回复经 NAS CosyVoice3 TTS 发送语音",
   "license": "MIT",
   "type": "commonjs",

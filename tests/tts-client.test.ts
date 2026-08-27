@@ -104,14 +104,15 @@ describe('TtsClient.synthesize', () => {
     expect(bodyText).not.toContain('prompt.wav')
   })
 
-  test('sends voice.transcript as prompt_text', async () => {
+  test('sends voice.transcript with "You are a helpful assistant.<|endofprompt|>" prefix as prompt_text', async () => {
     const fetchLike = mockFetch({ body: Buffer.alloc(44) })
     const client = new TtsClient(cfg, fetchLike as never)
     await client.synthesize('测试', TMP, 'p.wav', { transcript: '大家好，很高兴见到你' })
     const [, init] = fetchLike.mock.calls[0] as [string, { body: Uint8Array }]
     const bodyText = Buffer.from(init.body).toString('utf8')
     expect(bodyText).toContain('name="prompt_text"')
-    expect(bodyText).toContain('大家好，很高兴见到你')
+    // 缺此前缀会复现回显混入（实测），必须带前置
+    expect(bodyText).toContain('You are a helpful assistant.<|endofprompt|>大家好，很高兴见到你')
   })
 
   test('sends empty prompt_text when no transcript', async () => {

@@ -59,8 +59,12 @@ export class TtsClient {
     const boundary = `----akaTts${Date.now()}${Math.random().toString(16).slice(2)}`
     const chunks: Buffer[] = []
 
-    // zero_shot：prompt_text = 参考音频转写；服务端自动补 <|endofprompt|>，这里原样发送。
-    const promptText = (voice?.transcript ?? '').trim()
+    // zero_shot：prompt_text = "You are a helpful assistant.<|endofprompt|>" + 参考音频转写。
+    // ⚠️ 实测必须带 "You are a helpful assistant.<|endofprompt|>" 前置（2026-08-28 复现验证）：
+    // 缺此前缀时，模型会把参考转写当作正文回显混入（如把 halo 长转写尾巴念出来 → 音频明显变长）。
+    // 服务端只自动补结尾 <|endofprompt|>，不补开头前置，故这里必须显式加。
+    const rawTranscript = (voice?.transcript ?? '').trim()
+    const promptText = rawTranscript ? `You are a helpful assistant.<|endofprompt|>${rawTranscript}` : ''
     const pushField = (name: string, value: string) => {
       chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`))
     }
