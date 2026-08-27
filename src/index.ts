@@ -339,19 +339,37 @@ export function apply(ctx: Context, config: Config) {
       return `✅ 已切换到音色「${name}」（已保存，重启不丢）。`
     })
 
-  // —— .说话 指令：手动触发下一次回复用语音（一次性） ——
-  ctx.command('说话', '让 bot 下一条回复用语音（一次性）')
-    .action(async ({ session }) => {
-      if (!session) return '需要会话上下文。'
+  // —— .说 指令：说<内容> → 用当前音色直接说出该内容（走 sound-director LLM 改写）——
+  // 无内容 → 静默取消（不触发 TTS、不提示）。
+  ctx.command('说 [text:text]', '说 <内容>：用当前音色直接说出该内容')
+    .action(async ({ session }, text) => {
+      if (!session) return
+      const content = (text ?? '').trim()
+      if (!content) return // 静默取消
       const cid = String(session.channelId ?? session.cid ?? '')
-      if (!cid) return '无法确定会话频道。'
-      // 延迟 300ms 再武装：让本命令返回的"🔊 收到"文本先正常发出（不走语音）
-      setTimeout(() => {
-        if (!session.bot) return
-        voiceState(session.bot).forceVoiceChannels.set(cid, Date.now() + FORCE_VOICE_TTL)
-        logger.info('.说话 force-voice armed channel=%s (voice=%s)', cid, resolveCurrentVoice())
-      }, 300)
-      return '🔊 收到，下一句我用语音回你。'
+      const bot = session.bot
+      const platform = session.platform
+      if (!cid || !bot) return
+      void (async () => {
+        try {
+          const rendered = await renderVoice(content)
+          const voice = currentVoice()
+          if (!voice) {
+            logger.warn('说: no voice configured, no-op channel=%s', cid)
+            return
+          }
+          const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, voice)
+          await sendVoice(bot, cid, out.wavPath, platform, adv.napcatHttpUrl)
+          logger.info(
+            '说 direct speak channel=%s voice=%s len=%d dur=%dms source=%s ratio=%s loudnorm=%s',
+            cid, voice.name, out.pcmBytes, out.durationMs, rendered.source,
+            rendered.ratio.toFixed(3), String(out.loudnormApplied ?? false),
+          )
+        } catch (err) {
+          logger.warn('说 direct speak failed channel=%s: %s', cid, err instanceof Error ? err.message : String(err))
+        }
+      })()
+      return // 成功静默（语音即回复）
     })
 
   const yesimbot = (ctx as any).yesimbot

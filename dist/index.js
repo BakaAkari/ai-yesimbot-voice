@@ -747,16 +747,39 @@ ${lines}
     logger.info("voice switched to %s by user", name2);
     return `\u2705 \u5DF2\u5207\u6362\u5230\u97F3\u8272\u300C${name2}\u300D\uFF08\u5DF2\u4FDD\u5B58\uFF0C\u91CD\u542F\u4E0D\u4E22\uFF09\u3002`;
   });
-  ctx.command("\u8BF4\u8BDD", "\u8BA9 bot \u4E0B\u4E00\u6761\u56DE\u590D\u7528\u8BED\u97F3\uFF08\u4E00\u6B21\u6027\uFF09").action(async ({ session }) => {
-    if (!session) return "\u9700\u8981\u4F1A\u8BDD\u4E0A\u4E0B\u6587\u3002";
+  ctx.command("\u8BF4 [text:text]", "\u8BF4 <\u5185\u5BB9>\uFF1A\u7528\u5F53\u524D\u97F3\u8272\u76F4\u63A5\u8BF4\u51FA\u8BE5\u5185\u5BB9").action(async ({ session }, text) => {
+    if (!session) return;
+    const content = (text ?? "").trim();
+    if (!content) return;
     const cid = String(session.channelId ?? session.cid ?? "");
-    if (!cid) return "\u65E0\u6CD5\u786E\u5B9A\u4F1A\u8BDD\u9891\u9053\u3002";
-    setTimeout(() => {
-      if (!session.bot) return;
-      voiceState(session.bot).forceVoiceChannels.set(cid, Date.now() + FORCE_VOICE_TTL);
-      logger.info(".\u8BF4\u8BDD force-voice armed channel=%s (voice=%s)", cid, resolveCurrentVoice());
-    }, 300);
-    return "\u{1F50A} \u6536\u5230\uFF0C\u4E0B\u4E00\u53E5\u6211\u7528\u8BED\u97F3\u56DE\u4F60\u3002";
+    const bot = session.bot;
+    const platform = session.platform;
+    if (!cid || !bot) return;
+    void (async () => {
+      try {
+        const rendered = await renderVoice(content);
+        const voice = currentVoice();
+        if (!voice) {
+          logger.warn("\u8BF4: no voice configured, no-op channel=%s", cid);
+          return;
+        }
+        const out = await tts.synthesize(rendered.text, outputDir, `voice-${Date.now()}.wav`, voice);
+        await sendVoice(bot, cid, out.wavPath, platform, adv.napcatHttpUrl);
+        logger.info(
+          "\u8BF4 direct speak channel=%s voice=%s len=%d dur=%dms source=%s ratio=%s loudnorm=%s",
+          cid,
+          voice.name,
+          out.pcmBytes,
+          out.durationMs,
+          rendered.source,
+          rendered.ratio.toFixed(3),
+          String(out.loudnormApplied ?? false)
+        );
+      } catch (err) {
+        logger.warn("\u8BF4 direct speak failed channel=%s: %s", cid, err instanceof Error ? err.message : String(err));
+      }
+    })();
+    return;
   });
   const yesimbot = ctx.yesimbot;
   if (!yesimbot?.registerChannelPlugin) {
